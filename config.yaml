@@ -1,5 +1,4 @@
-title: "Image Annotation Tool"
-description: "Rate each image from 1 to 5"
-num_classes: 5
-images_folder: "images"
+title: "Audio Transcription Tool"
+description: "Annotate audio clips with transcriptions"
+audio_folder: "audio"
 max_history: 10
