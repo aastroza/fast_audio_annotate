@@ -88,7 +88,7 @@ def auto_generate_clip(audio_path, last_end_time=0):
     start = last_end_time
     end = start + 10.0
 
-    clip_id = clips.insert({
+    new_clip = clips.insert({
         'audio_path': str(audio_path),
         'start_timestamp': start,
         'end_timestamp': end,
@@ -97,7 +97,7 @@ def auto_generate_clip(audio_path, last_end_time=0):
         'timestamp': datetime.now().isoformat(),
         'marked': False
     })
-    return clips[clip_id]
+    return new_clip
 
 def get_current_clip():
     """Get the current clip being edited, auto-generating if needed."""
