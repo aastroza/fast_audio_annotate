@@ -182,13 +182,35 @@ def render_main_content():
             Div(
                 f"Audio {stats['current_audio_index']} of {stats['total_audio']} | ",
                 f"Clip {stats['current_clip_num']} of {stats['total_clips']} | ",
-                f"Marked: {stats['marked_clips']}",
+                f"Reviewed: {stats['marked_clips']}",
                 cls="progress"
             ),
         ),
 
-        # Current audio filename
-        Div(f"File: {state.current_audio}", cls="progress", style="font-weight: 500; margin-bottom: 15px;"),
+        # Current audio filename and playback info
+        Div(f"File: {state.current_audio}", cls="progress", style="font-weight: 500; margin-bottom: 10px;"),
+        
+        # Current time display and hotkeys info
+        Div(
+            Div(
+                "Current Time: ",
+                Span("0.00", id="current-time", style="font-weight: bold; color: #007bff;"),
+                " seconds",
+                style="font-size: 16px; margin-bottom: 10px;"
+            ),
+            Div(
+                "Hotkeys: ",
+                Span("[", style="color: #666;"),
+                Span("Q", style="font-weight: bold; color: #28a745;"),
+                Span("] Set Start Time | [", style="color: #666;"),
+                Span("W", style="font-weight: bold; color: #dc3545;"),
+                Span("] Set End Time | [", style="color: #666;"),
+                Span("Space", style="font-weight: bold; color: #007bff;"),
+                Span("] Play/Pause", style="color: #666;"),
+                style="font-size: 14px; color: #666; margin-bottom: 15px;"
+            ),
+            style="padding: 10px; background: #f8f9fa; border-radius: 6px; margin-bottom: 15px;"
+        ),
 
         # Waveform container
         Div(
@@ -279,7 +301,7 @@ def render_main_content():
                 style="margin-bottom: 15px;"
             ),
 
-            # Mark as problematic
+            # Mark as reviewed
             Div(
                 Label(
                     Input(
@@ -288,7 +310,7 @@ def render_main_content():
                         id="marked-input",
                         checked=current_clip.marked if current_clip else False
                     ),
-                    " Mark as problematic",
+                    " Mark as reviewed",
                     style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;"
                 ),
                 style="margin-bottom: 20px;"
@@ -497,6 +519,19 @@ def index():
                     });
                 }
 
+                // Update current time display
+                const updateCurrentTime = () => {
+                    const currentTimeEl = document.getElementById('current-time');
+                    if (currentTimeEl && wavesurfer) {
+                        const currentTime = wavesurfer.getCurrentTime();
+                        currentTimeEl.textContent = currentTime.toFixed(2);
+                    }
+                };
+
+                // Update time display during playback
+                wavesurfer.on('timeupdate', updateCurrentTime);
+                wavesurfer.on('seeking', updateCurrentTime);
+
                 // Keyboard shortcuts
                 document.addEventListener('keydown', (e) => {
                     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -519,6 +554,50 @@ def index():
                         case 'ArrowRight':
                             e.preventDefault();
                             wavesurfer.skip(2);
+                            break;
+                        case 'q':
+                        case 'Q':
+                            e.preventDefault();
+                            // Set start time to current playback position
+                            if (wavesurfer && currentRegion) {
+                                const currentTime = wavesurfer.getCurrentTime();
+                                const startInput = document.getElementById('start-time-input');
+                                if (startInput) {
+                                    startInput.value = currentTime.toFixed(2);
+                                    // Update the region
+                                    const endTime = currentRegion.end;
+                                    currentRegion.setOptions({ start: currentTime, end: endTime });
+                                    
+                                    // Send update to server
+                                    fetch('/set_start_time', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                        body: `time=${currentTime.toFixed(2)}`
+                                    });
+                                }
+                            }
+                            break;
+                        case 'w':
+                        case 'W':
+                            e.preventDefault();
+                            // Set end time to current playback position
+                            if (wavesurfer && currentRegion) {
+                                const currentTime = wavesurfer.getCurrentTime();
+                                const endInput = document.getElementById('end-time-input');
+                                if (endInput) {
+                                    endInput.value = currentTime.toFixed(2);
+                                    // Update the region
+                                    const startTime = currentRegion.start;
+                                    currentRegion.setOptions({ start: startTime, end: currentTime });
+                                    
+                                    // Send update to server
+                                    fetch('/set_end_time', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                        body: `time=${currentTime.toFixed(2)}`
+                                    });
+                                }
+                            }
                             break;
                     }
                 });
@@ -568,6 +647,38 @@ def update_times(start_time: str = "0", end_time: str = "10"):
                 clips.update({
                     'start_timestamp': start,
                     'end_timestamp': end,
+                    'timestamp': datetime.now().isoformat()
+                }, current_clip.id)
+        except ValueError:
+            pass
+    return render_main_content()
+
+@rt("/set_start_time", methods=["POST"])
+def set_start_time(time: str = "0"):
+    """Set the start time for the current clip."""
+    current_clip = get_current_clip()
+    if current_clip:
+        try:
+            start_time = float(time)
+            if start_time >= 0 and start_time < current_clip.end_timestamp:
+                clips.update({
+                    'start_timestamp': start_time,
+                    'timestamp': datetime.now().isoformat()
+                }, current_clip.id)
+        except ValueError:
+            pass
+    return render_main_content()
+
+@rt("/set_end_time", methods=["POST"])
+def set_end_time(time: str = "10"):
+    """Set the end time for the current clip."""
+    current_clip = get_current_clip()
+    if current_clip:
+        try:
+            end_time = float(time)
+            if end_time > current_clip.start_timestamp:
+                clips.update({
+                    'end_timestamp': end_time,
                     'timestamp': datetime.now().isoformat()
                 }, current_clip.id)
         except ValueError:

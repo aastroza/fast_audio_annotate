@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Simple script to read and print the annotations database content."""
+"""Simple script to read and print the clips database content."""
 
 import sqlite3
 import sys
 from pathlib import Path
 
 def print_db_content(db_path):
-    """Print the content of the annotations database."""
+    """Print the content of the clips database."""
     db_file = Path(db_path)
     
     if not db_file.exists():
@@ -27,12 +27,12 @@ def print_db_content(db_path):
         print(f"Tables in database: {[table[0] for table in tables]}")
         print()
         
-        # Read annotations table
-        cursor.execute("SELECT * FROM annotation ORDER BY id")
+        # Read clips table
+        cursor.execute("SELECT * FROM clip ORDER BY audio_path, start_timestamp")
         rows = cursor.fetchall()
         
         # Get column names
-        cursor.execute("PRAGMA table_info(annotation)")
+        cursor.execute("PRAGMA table_info(clip)")
         columns = [row[1] for row in cursor.fetchall()]
         print(f"Columns: {columns}")
         print()
@@ -45,29 +45,52 @@ def print_db_content(db_path):
         print(header)
         print("-" * len(header))
         
-        # Print rows
+        # Print rows with better formatting for clips
         for row in rows:
-            row_str = " | ".join(f"{str(val)[:15]:15}" for val in row)
+            # Format specific columns for better readability
+            formatted_row = []
+            for i, val in enumerate(row):
+                if columns[i] in ['start_timestamp', 'end_timestamp'] and val is not None:
+                    # Format timestamps to 2 decimal places
+                    formatted_row.append(f"{float(val):.2f}")
+                elif columns[i] == 'text' and val:
+                    # Truncate text and show preview
+                    text_preview = str(val)[:30] + "..." if len(str(val)) > 30 else str(val)
+                    formatted_row.append(text_preview)
+                else:
+                    formatted_row.append(str(val) if val is not None else "")
+            
+            row_str = " | ".join(f"{val[:15]:15}" for val in formatted_row)
             print(row_str)
             
         print("-" * 80)
         
-        # Summary statistics
-        cursor.execute("SELECT rating, COUNT(*) FROM annotation WHERE rating > 0 GROUP BY rating ORDER BY rating")
-        rating_counts = cursor.fetchall()
+        # Summary statistics for clips
+        cursor.execute("SELECT COUNT(DISTINCT audio_path) FROM clip")
+        unique_audio_files = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM annotation WHERE marked = 1")
+        cursor.execute("SELECT COUNT(*) FROM clip WHERE marked = 1")
         marked_count = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM annotation WHERE rating = 0")
-        unrated_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM clip WHERE text = '' OR text IS NULL")
+        empty_transcription_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT audio_path, COUNT(*) FROM clip GROUP BY audio_path ORDER BY audio_path")
+        clips_per_audio = cursor.fetchall()
+        
+        cursor.execute("SELECT AVG(end_timestamp - start_timestamp) FROM clip")
+        avg_clip_duration = cursor.fetchone()[0]
         
         print("\nSummary:")
-        print(f"- Unrated images: {unrated_count}")
-        print(f"- Marked images: {marked_count}")
-        print("- Rating distribution:")
-        for rating, count in rating_counts:
-            print(f"  Rating {rating}: {count} images")
+        print(f"- Total clips: {len(rows)}")
+        print(f"- Unique audio files: {unique_audio_files}")
+        print(f"- Clips with empty transcription: {empty_transcription_count}")
+        print(f"- Marked clips: {marked_count}")
+        if avg_clip_duration:
+            print(f"- Average clip duration: {avg_clip_duration:.2f} seconds")
+        print("\nClips per audio file:")
+        for audio_path, count in clips_per_audio:
+            print(f"  {audio_path}: {count} clips")
             
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -77,7 +100,7 @@ def print_db_content(db_path):
 
 if __name__ == "__main__":
     # Default path
-    db_path = "new/2024_SIN_R_PER_T2_L45_1-22-13/annotations.db"
+    db_path = "audio/annotations.db"
     
     # Allow command line argument
     if len(sys.argv) > 1:

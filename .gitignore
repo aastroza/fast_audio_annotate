@@ -39,3 +39,6 @@ new_data/
 
 # Audios
 audio/
+.sesskey
+.github/copilot-instructions.md
+scripts/clips_metadata.json

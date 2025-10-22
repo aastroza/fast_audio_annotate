@@ -1,4 +1,4 @@
-title: "Audio Transcription Tool"
+title: "Audio Annotation Tool"
 description: "Annotate audio clips with transcriptions"
 audio_folder: "audio"
 max_history: 10
