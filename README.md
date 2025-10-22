@@ -1,6 +1,6 @@
 # Fast Audio Annotate
 
-A FastHTML audio transcription annotation tool - Simple, visual audio annotation with waveform display built with FastHTML and WaveSurfer.js.
+A FastHTML audio transcription annotation tool - Streamlined, clip-focused audio annotation with waveform display built with FastHTML and WaveSurfer.js.
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![FastHTML](https://img.shields.io/badge/FastHTML-latest-green)
@@ -8,12 +8,14 @@ A FastHTML audio transcription annotation tool - Simple, visual audio annotation
 
 ## Features
 
+- **Clip-focused workflow** - Navigate and edit one clip at a time
 - **Visual waveform display** - Interactive audio waveform with zoom and navigation
-- **Clip-based annotation** - Create clips by selecting regions on the waveform
-- **Transcription editing** - Add text transcriptions for each audio clip
-- **Flexible playback** - Play entire audio, individual clips, or arbitrary segments
+- **Auto-generation** - Automatically creates 10-second clips as you navigate
+- **Precise timestamp editing** - Numeric input fields for exact clip boundaries
+- **Dedicated transcription area** - Large text area for comfortable transcription editing
+- **Visual clip adjustment** - Drag and resize clip boundaries on the waveform
+- **Clip-only playback** - Play button always plays the current clip, not the full audio
 - **Variable speed** - Adjust playback speed (0.5x to 2x)
-- **Drag & resize clips** - Visually adjust clip boundaries on the waveform
 - **Mark problematic clips** - Flag clips that have issues
 - **Multi-user support** - Tracks username and timestamp for each annotation
 - **SQLite database** - Persistent storage with efficient queries
@@ -28,8 +30,9 @@ git clone https://github.com/yourusername/fast_audio_annotate.git
 cd fast_audio_annotate
 pip install .
 
-# Configure (edit config.yaml)
 # Place audio files in audio/ folder
+mkdir -p audio
+cp your-audio-files.webm audio/
 
 # Run with uv (recommended)
 uv run python main.py
@@ -42,22 +45,70 @@ Open browser to `http://localhost:5001`
 
 ## How to Annotate
 
-1. **Load Audio**: Navigate between audio files using Previous/Next buttons
-2. **Create Clips**: Click and drag on the waveform to select a region, then double-click to create a clip
-3. **Add Transcription**: Click "Edit" on any clip to add transcription text
-4. **Adjust Boundaries**: Drag the edges of existing clips to adjust start/end times
-5. **Play Clips**: Click on a clip region to play just that segment
-6. **Mark Issues**: Use the checkbox when editing to flag problematic clips
+### Basic Workflow
+
+1. **Select Audio**: Choose an audio file from the dropdown
+2. **Navigate Clips**: Use Previous/Next buttons to move between clips
+   - If no clip exists, a new 10-second clip is automatically created
+   - Clips are always sorted by start time
+3. **Adjust Timestamps**:
+   - Type exact values in Start/End input fields
+   - Or drag the clip boundaries on the waveform
+   - Click "Update Times" to apply numeric changes
+4. **Add Transcription**: Type or paste transcription text in the large text area
+5. **Save**: Click "Save Clip" to store your changes
+6. **Repeat**: Click "Next Clip" to move forward (auto-generates new clips as needed)
+
+### Key Features
+
+#### Single-Clip Focus
+The interface always displays exactly one clip at a time, making it easy to focus on transcribing without distraction.
+
+#### Auto-Generation
+When you click "Next Clip" at the end of the audio, the tool automatically creates a new 10-second clip starting from where the last clip ended.
+
+#### Precise Control
+- **Numeric inputs**: Enter exact timestamps (e.g., 12.45 seconds)
+- **Visual adjustment**: Drag clip boundaries on the waveform
+- **Real-time sync**: Changes in inputs update the waveform and vice versa
+
+#### Clip-Only Playback
+The "Play Clip" button only plays the current clip region, not the entire audio file. This lets you quickly review your clip boundaries.
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `Space` | Play/Pause audio |
+| `Space` | Play/Pause current clip |
 | `←/→` | Skip backward/forward 2 seconds |
-| Click & Drag | Create new clip region |
-| Double-click region | Open edit form for clip |
-| Click region | Play that clip |
+
+## Interface Overview
+
+```
+┌─────────────────────────────────────────┐
+│ Audio File: [Dropdown Selector]         │  ← Select audio file
+├─────────────────────────────────────────┤
+│ Audio 1 of 5 | Clip 3 of 12 | Marked: 1│  ← Progress stats
+├─────────────────────────────────────────┤
+│ [Waveform Display]                      │  ← Visual waveform
+│ [Timeline]                              │
+├─────────────────────────────────────────┤
+│ [▶ Play Clip] [⏸ Pause] [⏹ Stop]       │  ← Playback controls
+├─────────────────────────────────────────┤
+│ Clip 3                                  │
+│ Start: [12.45] End: [22.45] [Update]   │  ← Precise timestamps
+│                                         │
+│ Transcription:                          │
+│ ┌─────────────────────────────────────┐ │
+│ │ [Large text area for transcription] │ │  ← Main editing area
+│ │                                     │ │
+│ └─────────────────────────────────────┘ │
+│ ☐ Mark as problematic                  │
+│ [💾 Save Clip]                          │
+├─────────────────────────────────────────┤
+│ [← Previous] [Delete] [Next Clip →]    │  ← Clip navigation
+└─────────────────────────────────────────┘
+```
 
 ## Configuration
 
@@ -114,14 +165,26 @@ pyproject.toml       # Project metadata and dependencies
 - **SQLite** - Lightweight database for annotations
 - **HTMX** - Dynamic HTML updates without JavaScript
 
-## Development
+## Workflow Tips
 
-The app uses FastHTML's single-file pattern for simplicity:
-- Database models and routes in `main.py`
-- SQLite for persistence
-- HTMX for dynamic updates
-- WaveSurfer.js for client-side audio handling
-- Clean state management with server-side session
+### Efficient Transcription
+1. Load audio file and start with clip 1
+2. Play the clip to hear the audio
+3. Adjust start/end times if needed
+4. Type the transcription
+5. Click "Save Clip"
+6. Press "Next Clip" to auto-advance (creates new clip if at the end)
+
+### Handling Long Audio
+The tool automatically segments long audio files into manageable 10-second clips. You can:
+- Adjust clip lengths as needed (shorter for dense dialogue, longer for sparse speech)
+- Delete unnecessary clips (silence, music, etc.)
+- Navigate freely between clips
+
+### Quality Control
+- Use the "Mark as problematic" checkbox for difficult clips
+- Review marked clips later by checking the stats counter
+- Delete and regenerate clips if needed
 
 ## Exporting Annotations
 
@@ -133,15 +196,38 @@ import json
 
 # Connect to database
 conn = sqlite3.connect('audio/annotations.db')
+conn.row_factory = sqlite3.Row
 cursor = conn.cursor()
 
 # Get all clips
-cursor.execute('SELECT * FROM clip')
-clips = cursor.fetchall()
+cursor.execute('SELECT * FROM clip ORDER BY audio_path, start_timestamp')
+clips = [dict(row) for row in cursor.fetchall()]
 
 # Export to JSON
 with open('annotations.json', 'w') as f:
     json.dump(clips, f, indent=2)
+
+print(f"Exported {len(clips)} clips to annotations.json")
+```
+
+### Export Format
+
+The exported JSON will have this structure:
+
+```json
+[
+  {
+    "id": 1,
+    "audio_path": "interview.webm",
+    "start_timestamp": 0.0,
+    "end_timestamp": 10.0,
+    "text": "Hello, welcome to the interview.",
+    "username": "user",
+    "timestamp": "2025-01-15T10:30:00",
+    "marked": false
+  },
+  ...
+]
 ```
 
 ## License
