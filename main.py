@@ -4,7 +4,6 @@ from starlette.responses import FileResponse, Response
 from pathlib import Path
 import os
 from datetime import datetime
-from urllib.parse import urlencode
 from dataclasses import dataclass
 import simple_parsing as sp
 import json
@@ -33,23 +32,6 @@ class Clip:
 
 clips = None
 
-def switch_folder(new_folder: str):
-    """Switch to a different data folder."""
-    global config, db, clips, state
-
-    folder_path = get_folder_path(new_folder)
-    if not folder_path:
-        print(f"Warning: Could not find folder path for {new_folder}")
-        return
-
-    config.audio_folder = folder_path
-    db = database(f'{config.audio_folder}/annotations.db')
-    clips = db.create(Clip, pk='id')
-
-    state.current_index = 0
-    state.current_audio = None
-    state.history.clear()
-
 # Initialize FastHTML app with custom styles and scripts
 app, rt = fast_app(
     hdrs=(
@@ -66,8 +48,9 @@ app, rt = fast_app(
 # State management
 class AppState:
     def __init__(self):
-        self.current_index = 0
-        self.current_audio = None
+        self.current_audio = None  # Path to current audio file
+        self.current_clip_index = 0  # Index of current clip being edited
+        self.audio_duration = 0  # Duration of current audio in seconds
         self.history = []
 
 state = AppState()
@@ -83,221 +66,148 @@ def get_audio_files():
             audio_files.extend(audio_dir.rglob(f"*{ext.upper()}"))
     return sorted([audio.relative_to(audio_dir) for audio in audio_files])
 
-def find_annotation_folders(search_dir: Path = None):
-    """Find all folders containing annotations.db files."""
-    if search_dir is None:
-        search_dir = Path(".")
-
-    annotation_folders = []
-    try:
-        for item in search_dir.iterdir():
-            if item.is_dir() and (item / "annotations.db").exists():
-                try:
-                    rel_path = item.relative_to(search_dir)
-                    annotation_folders.append({
-                        "name": str(rel_path),
-                        "path": str(item)
-                    })
-                except ValueError:
-                    continue
-    except (PermissionError, OSError):
-        pass
-
-    return sorted(annotation_folders, key=lambda x: x["name"])
-
-def get_available_folders():
-    """Get all available annotation folders."""
-    if hasattr(config, 'audio_folder') and config.audio_folder and Path(config.audio_folder).exists():
-        current_folder = Path(config.audio_folder)
-        parent_dir = current_folder.parent
-        annotation_folders = find_annotation_folders(parent_dir)
-        return [f["name"] for f in annotation_folders]
-
-    for search_path in [Path("data"), Path(".")]:
-        if search_path.exists():
-            annotation_folders = find_annotation_folders(search_path)
-            if annotation_folders:
-                return [f["name"] for f in annotation_folders]
-
-    return []
-
-def get_folder_path(folder_name: str):
-    """Get the full path for a folder name."""
-    if hasattr(config, 'audio_folder') and config.audio_folder and Path(config.audio_folder).exists():
-        current_folder = Path(config.audio_folder)
-        parent_dir = current_folder.parent
-        annotation_folders = find_annotation_folders(parent_dir)
-        for folder in annotation_folders:
-            if folder["name"] == folder_name:
-                return folder["path"]
-
-    for search_path in [Path("data"), Path(".")]:
-        if search_path.exists():
-            annotation_folders = find_annotation_folders(search_path)
-            for folder in annotation_folders:
-                if folder["name"] == folder_name:
-                    return folder["path"]
-
-    return None
-
 def get_username():
     """Get current username."""
     return os.environ.get('USER') or os.environ.get('USERNAME') or 'unknown'
 
-def get_current_audio():
-    """Get current audio file based on state."""
-    audio_files = get_audio_files()
-    if not audio_files:
-        return None
-    if 0 <= state.current_index < len(audio_files):
-        return audio_files[state.current_index]
-    return None
-
 def get_clips_for_audio(audio_path):
-    """Get all clips for a specific audio file."""
-    return clips("audio_path=?", (str(audio_path),))
+    """Get all clips for a specific audio file, sorted by start time."""
+    if not audio_path:
+        return []
+    return sorted(
+        clips("audio_path=?", (str(audio_path),)),
+        key=lambda c: c.start_timestamp
+    )
+
+def auto_generate_clip(audio_path, last_end_time=0):
+    """Auto-generate a 10-second clip starting from last_end_time."""
+    start = last_end_time
+    end = start + 10.0
+
+    clip_id = clips.insert({
+        'audio_path': str(audio_path),
+        'start_timestamp': start,
+        'end_timestamp': end,
+        'text': '',
+        'username': get_username(),
+        'timestamp': datetime.now().isoformat(),
+        'marked': False
+    })
+    return clips[clip_id]
+
+def get_current_clip():
+    """Get the current clip being edited, auto-generating if needed."""
+    if not state.current_audio:
+        return None
+
+    audio_clips = get_clips_for_audio(state.current_audio)
+
+    # If no clips exist, create the first one
+    if not audio_clips:
+        return auto_generate_clip(state.current_audio, 0)
+
+    # Ensure current_clip_index is valid
+    if state.current_clip_index >= len(audio_clips):
+        state.current_clip_index = len(audio_clips) - 1
+    elif state.current_clip_index < 0:
+        state.current_clip_index = 0
+
+    return audio_clips[state.current_clip_index]
 
 def get_progress_stats():
     """Calculate progress statistics."""
     audio_files = get_audio_files()
-    total = len(audio_files)
+    total_audio = len(audio_files)
 
-    # Count how many audio files have at least one clip
-    annotated_audio = set(c.audio_path for c in clips())
-    annotated_count = len(annotated_audio)
+    if not state.current_audio:
+        return {
+            'total_audio': total_audio,
+            'current_audio_index': 0,
+            'total_clips': 0,
+            'current_clip_num': 0,
+            'marked_clips': 0
+        }
 
-    # Count total clips and marked clips
-    all_clips = clips()
-    total_clips = len(all_clips)
-    marked_clips = len([c for c in all_clips if c.marked])
+    # Find current audio index
+    try:
+        current_audio_index = audio_files.index(Path(state.current_audio)) + 1
+    except (ValueError, AttributeError):
+        current_audio_index = 1
+
+    # Count clips for current audio
+    audio_clips = get_clips_for_audio(state.current_audio)
+    total_clips = len(audio_clips)
+    current_clip_num = state.current_clip_index + 1
+    marked_clips = len([c for c in audio_clips if c.marked])
 
     return {
-        'total_audio': total,
-        'annotated_audio': annotated_count,
+        'total_audio': total_audio,
+        'current_audio_index': current_audio_index,
         'total_clips': total_clips,
-        'marked_clips': marked_clips,
-        'remaining_audio': total - annotated_count,
-        'percentage': round(100 * annotated_count / total) if total > 0 else 0
+        'current_clip_num': current_clip_num,
+        'marked_clips': marked_clips
     }
-
-def index_of_audio(audio_name: str) -> int:
-    """Return index of an audio file in the list."""
-    audio_files = get_audio_files()
-    for i, p in enumerate(audio_files):
-        if str(p) == audio_name:
-            return i
-    return -1
 
 @rt("/")
 def index():
     """Main audio annotation interface."""
-    # Check if we have a valid audio_folder
-    if not hasattr(config, 'audio_folder') or not config.audio_folder or not Path(config.audio_folder).exists():
-        available_folders = get_available_folders()
+    audio_files = get_audio_files()
+
+    if not audio_files:
         return Titled(config.title,
             Div(
-                H2("Select a Folder to Start Annotating", style="text-align: center; margin-bottom: 30px;"),
-                Div(
-                    "Please select a folder containing an annotations.db file to begin.",
-                    style="text-align: center; margin-bottom: 30px; color: #666;"
-                ),
-                Div(
-                    *[Div(
-                        Span(f"📁 {folder}", style="flex: 1;"),
-                        Button(
-                            "Select",
-                            hx_post="/switch_folder",
-                            hx_vals=f"js:{{folder_select: '{folder}'}}",
-                            hx_target="body",
-                            hx_swap="outerHTML",
-                            style="padding: 6px 12px; border-radius: 4px; border: 1px solid #007bff; background: #007bff; color: white; cursor: pointer;"
-                        ),
-                        style="display: flex; align-items: center; justify-content: space-between; padding: 10px; margin-bottom: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;"
-                    ) for folder in available_folders[:10]],
-                    style="max-width: 600px; margin: 0 auto;"
-                ),
+                H2("No Audio Files Found", style="text-align: center; margin-bottom: 20px;"),
+                P(f"Please add audio files to the '{config.audio_folder}/' directory.",
+                  style="text-align: center; color: #666;"),
+                P("Supported formats: .webm, .mp3, .wav, .ogg, .m4a, .flac",
+                  style="text-align: center; color: #999; font-size: 14px;"),
                 style="max-width: 800px; margin: 2rem auto; padding: 2rem; background: white; border-radius: 8px;"
             )
         )
 
-    audio_files = get_audio_files()
-    if not audio_files:
-        return Titled(config.title,
-            Div(f"No audio files found in {config.audio_folder}/ directory",
-                style="max-width: 800px; margin: 2rem auto; padding: 2rem; background: white; border-radius: 8px;")
-        )
+    # Set default audio if none selected
+    if not state.current_audio:
+        state.current_audio = str(audio_files[0])
+        state.current_clip_index = 0
 
-    current_audio = get_current_audio()
-    if not current_audio:
-        state.current_index = 0
-        current_audio = get_current_audio()
-
-    state.current_audio = str(current_audio)
-    audio_clips = get_clips_for_audio(current_audio) if current_audio else []
+    current_clip = get_current_clip()
     stats = get_progress_stats()
 
     return Titled(config.title,
         Div(
-            # Folder selection
+            # Audio file selector
             Div(
-                Label("Choose Folder:", style="margin-right: 10px; font-weight: 600;"),
+                Label("Audio File:", style="margin-right: 10px; font-weight: 600;"),
                 Select(
-                    *[Option(folder, value=folder, selected=(get_folder_path(folder) == config.audio_folder))
-                      for folder in get_available_folders()],
-                    name="folder_select",
-                    hx_post="/switch_folder",
+                    *[Option(str(audio), value=str(audio), selected=(str(audio) == state.current_audio))
+                      for audio in audio_files],
+                    name="audio_select",
+                    hx_post="/select_audio",
                     hx_target="body",
                     hx_swap="outerHTML",
                     hx_trigger="change",
-                    style="padding: 8px 12px; border-radius: 6px; border: 2px solid #007bff; background: white; font-size: 14px; min-width: 300px;"
+                    style="flex: 1; padding: 8px 12px; border-radius: 6px; border: 2px solid #007bff; background: white; font-size: 14px;"
                 ),
-                style="display: flex; align-items: center; justify-content: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;"
+                style="display: flex; align-items: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;"
             ),
 
             # Progress section
             Div(
                 Div(
-                    f"Audio {state.current_index + 1} of {stats['total_audio']} | ",
-                    f"Annotated: {stats['annotated_audio']}/{stats['total_audio']} ({stats['percentage']}%) | ",
-                    f"Total Clips: {stats['total_clips']} | ",
+                    f"Audio {stats['current_audio_index']} of {stats['total_audio']} | ",
+                    f"Clip {stats['current_clip_num']} of {stats['total_clips']} | ",
                     f"Marked: {stats['marked_clips']}",
                     cls="progress"
                 ),
-                Div(
-                    Div(style=f"width: {stats['percentage']}%", cls="progress-fill"),
-                    cls="progress-bar"
-                ),
             ),
 
-            # Current audio info
-            Div(f"Current: {current_audio}", cls="progress", style="font-weight: 500; margin-bottom: 10px;"),
-
-            # Navigation controls
-            Div(
-                Button(
-                    "← Previous Audio",
-                    cls="nav-btn",
-                    hx_post="/prev_audio",
-                    hx_target="body",
-                    hx_swap="outerHTML",
-                    disabled=state.current_index == 0
-                ),
-                Button(
-                    "Next Audio →",
-                    cls="nav-btn",
-                    hx_post="/next_audio",
-                    hx_target="body",
-                    hx_swap="outerHTML",
-                    disabled=state.current_index >= len(audio_files) - 1
-                ),
-                cls="nav-controls",
-                style="margin-bottom: 20px; display: flex; gap: 10px; justify-content: center;"
-            ),
+            # Current audio filename
+            Div(f"File: {state.current_audio}", cls="progress", style="font-weight: 500; margin-bottom: 15px;"),
 
             # Waveform container
             Div(
                 id="waveform",
-                style="width: 100%; height: 128px; margin-bottom: 20px; background: #f0f0f0; border-radius: 4px;"
+                style="width: 100%; height: 128px; margin-bottom: 15px; background: #f0f0f0; border-radius: 4px;"
             ),
 
             # Timeline container
@@ -308,10 +218,10 @@ def index():
 
             # Playback controls
             Div(
-                Button("▶ Play", id="play-btn", cls="control-btn", style="padding: 10px 20px; font-size: 16px;"),
-                Button("⏸ Pause", id="pause-btn", cls="control-btn", style="padding: 10px 20px; font-size: 16px;"),
-                Button("⏹ Stop", id="stop-btn", cls="control-btn", style="padding: 10px 20px; font-size: 16px;"),
-                Label("Speed:", style="margin-left: 20px;"),
+                Button("▶ Play Clip", id="play-btn", cls="control-btn", style="padding: 12px 24px; font-size: 16px;"),
+                Button("⏸ Pause", id="pause-btn", cls="control-btn", style="padding: 12px 24px; font-size: 16px;"),
+                Button("⏹ Stop", id="stop-btn", cls="control-btn", style="padding: 12px 24px; font-size: 16px;"),
+                Label("Speed:", style="margin-left: 20px; font-weight: 500;"),
                 Select(
                     Option("0.5x", value="0.5"),
                     Option("0.75x", value="0.75"),
@@ -320,24 +230,127 @@ def index():
                     Option("1.5x", value="1.5"),
                     Option("2x", value="2"),
                     id="speed-select",
-                    style="padding: 5px; margin-left: 5px;"
+                    style="padding: 8px; margin-left: 5px;"
                 ),
-                style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 30px; padding: 15px; background: #f8f9fa; border-radius: 8px;"
+                style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 25px; padding: 15px; background: #f8f9fa; border-radius: 8px;"
             ),
 
-            # Clips section
+            # Current clip editor
             Div(
-                H3("Clips", style="margin-bottom: 15px;"),
+                H3(f"Clip {stats['current_clip_num']}", style="margin-bottom: 15px; color: #007bff;"),
+
+                # Timestamp controls
                 Div(
-                    *[render_clip(clip) for clip in audio_clips],
-                    id="clips-list",
-                    style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 10px; background: white;"
-                ) if audio_clips else Div(
-                    "No clips yet. Click and drag on the waveform to create a clip.",
-                    id="clips-list",
-                    style="padding: 20px; text-align: center; color: #666; border: 1px dashed #ccc; border-radius: 4px; background: #fafafa;"
+                    Div(
+                        Label("Start (seconds):", style="display: block; margin-bottom: 5px; font-weight: 500;"),
+                        Input(
+                            type="number",
+                            name="start_time",
+                            value=f"{current_clip.start_timestamp:.2f}" if current_clip else "0.00",
+                            step="0.01",
+                            min="0",
+                            id="start-time-input",
+                            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"
+                        ),
+                        style="flex: 1;"
+                    ),
+                    Div(
+                        Label("End (seconds):", style="display: block; margin-bottom: 5px; font-weight: 500;"),
+                        Input(
+                            type="number",
+                            name="end_time",
+                            value=f"{current_clip.end_timestamp:.2f}" if current_clip else "10.00",
+                            step="0.01",
+                            min="0",
+                            id="end-time-input",
+                            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"
+                        ),
+                        style="flex: 1;"
+                    ),
+                    Button(
+                        "Update Times",
+                        hx_post="/update_times",
+                        hx_include="#start-time-input, #end-time-input",
+                        hx_target="body",
+                        hx_swap="outerHTML",
+                        cls="update-btn",
+                        style="align-self: flex-end; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;"
+                    ),
+                    style="display: flex; gap: 15px; margin-bottom: 20px;"
                 ),
-                style="margin-bottom: 20px;"
+
+                # Transcription text area
+                Div(
+                    Label("Transcription:", style="display: block; margin-bottom: 8px; font-weight: 500; font-size: 16px;"),
+                    Textarea(
+                        current_clip.text if current_clip and current_clip.text else "",
+                        name="transcription",
+                        id="transcription-input",
+                        rows="6",
+                        placeholder="Enter transcription for this clip...",
+                        style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 4px; font-family: inherit; font-size: 14px; resize: vertical;"
+                    ),
+                    style="margin-bottom: 15px;"
+                ),
+
+                # Mark as problematic
+                Div(
+                    Label(
+                        Input(
+                            type="checkbox",
+                            name="marked",
+                            id="marked-input",
+                            checked=current_clip.marked if current_clip else False
+                        ),
+                        " Mark as problematic",
+                        style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;"
+                    ),
+                    style="margin-bottom: 20px;"
+                ),
+
+                # Save button
+                Button(
+                    "💾 Save Clip",
+                    hx_post="/save_current_clip",
+                    hx_include="#transcription-input, #marked-input",
+                    hx_target="body",
+                    hx_swap="outerHTML",
+                    cls="save-btn",
+                    style="width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 600;"
+                ),
+
+                style="padding: 20px; background: #f9f9f9; border: 2px solid #007bff; border-radius: 8px; margin-bottom: 20px;"
+            ),
+
+            # Navigation controls
+            Div(
+                Button(
+                    "← Previous Clip",
+                    cls="nav-btn",
+                    hx_post="/prev_clip",
+                    hx_target="body",
+                    hx_swap="outerHTML",
+                    style="flex: 1;"
+                ),
+                Button(
+                    "Delete Clip",
+                    hx_post="/delete_current_clip",
+                    hx_target="body",
+                    hx_swap="outerHTML",
+                    hx_confirm="Delete this clip?",
+                    cls="delete-btn",
+                    style="background: #dc3545; color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer;"
+                ),
+                Button(
+                    "Next Clip →",
+                    cls="nav-btn",
+                    hx_post="/next_clip",
+                    hx_target="body",
+                    hx_swap="outerHTML",
+                    style="flex: 1;"
+                ),
+                cls="nav-controls",
+                style="display: flex; gap: 10px; justify-content: center;"
             ),
 
             cls="container"
@@ -347,6 +360,7 @@ def index():
         Script(f"""
             let wavesurfer;
             let wsRegions;
+            let currentRegion = null;
 
             document.addEventListener('DOMContentLoaded', function() {{
                 // Initialize WaveSurfer
@@ -370,58 +384,56 @@ def index():
                 }}));
 
                 // Load audio file
-                wavesurfer.load('/{config.audio_folder}/{current_audio}');
+                wavesurfer.load('/{config.audio_folder}/{state.current_audio}');
 
-                // Load existing clips as regions
-                const existingClips = {json.dumps([{"id": c.id, "start": c.start_timestamp, "end": c.end_timestamp, "text": c.text} for c in audio_clips])};
+                // Load current clip as region
+                const clipData = {{
+                    start: {current_clip.start_timestamp if current_clip else 0},
+                    end: {current_clip.end_timestamp if current_clip else 10}
+                }};
 
                 wavesurfer.on('ready', () => {{
-                    existingClips.forEach(clip => {{
-                        wsRegions.addRegion({{
-                            id: 'clip-' + clip.id,
-                            start: clip.start,
-                            end: clip.end,
-                            color: 'rgba(0, 123, 255, 0.3)',
-                            drag: true,
-                            resize: true,
-                        }});
+                    // Clear any existing regions
+                    wsRegions.clearRegions();
+
+                    // Add current clip region
+                    currentRegion = wsRegions.addRegion({{
+                        start: clipData.start,
+                        end: clipData.end,
+                        color: 'rgba(0, 123, 255, 0.3)',
+                        drag: true,
+                        resize: true,
+                    }});
+
+                    // Update input fields when region is dragged/resized
+                    currentRegion.on('update', () => {{
+                        document.getElementById('start-time-input').value = currentRegion.start.toFixed(2);
+                        document.getElementById('end-time-input').value = currentRegion.end.toFixed(2);
                     }});
                 }});
 
-                // Handle region creation
-                wsRegions.enableDragSelection({{
-                    color: 'rgba(0, 200, 0, 0.3)',
-                }});
-
-                wsRegions.on('region-created', (region) => {{
-                    console.log('Region created:', region.start, region.end);
-                }});
-
-                // Handle region update (drag/resize)
-                wsRegions.on('region-updated', (region) => {{
-                    const clipId = region.id.replace('clip-', '');
-                    if (clipId && clipId !== region.id) {{
-                        // Update existing clip
-                        htmx.ajax('POST', '/update_clip_times', {{
-                            values: {{
-                                clip_id: clipId,
-                                start: region.start,
-                                end: region.end
-                            }},
-                            swap: 'none'
-                        }});
+                // Update region when input fields change
+                document.getElementById('start-time-input').addEventListener('input', (e) => {{
+                    if (currentRegion) {{
+                        const start = parseFloat(e.target.value) || 0;
+                        const end = currentRegion.end;
+                        currentRegion.setOptions({{ start, end }});
                     }}
                 }});
 
-                // Handle region click (play that region)
-                wsRegions.on('region-clicked', (region, e) => {{
-                    e.stopPropagation();
-                    region.play();
+                document.getElementById('end-time-input').addEventListener('input', (e) => {{
+                    if (currentRegion) {{
+                        const start = currentRegion.start;
+                        const end = parseFloat(e.target.value) || 10;
+                        currentRegion.setOptions({{ start, end }});
+                    }}
                 }});
 
-                // Playback controls
+                // Playback controls - play only current clip
                 document.getElementById('play-btn').addEventListener('click', () => {{
-                    wavesurfer.play();
+                    if (currentRegion) {{
+                        currentRegion.play();
+                    }}
                 }});
 
                 document.getElementById('pause-btn').addEventListener('click', () => {{
@@ -436,31 +448,6 @@ def index():
                     wavesurfer.setPlaybackRate(parseFloat(e.target.value));
                 }});
 
-                // Handle double-click on waveform to create clip
-                wsRegions.on('region-double-clicked', (region, e) => {{
-                    e.stopPropagation();
-                    // Get clip ID if this is an existing clip
-                    const clipId = region.id.replace('clip-', '');
-                    if (clipId && clipId !== region.id) {{
-                        // This is an existing clip - open edit form
-                        const clipElement = document.getElementById('clip-' + clipId);
-                        if (clipElement) {{
-                            const editBtn = clipElement.querySelector('[data-action="edit"]');
-                            if (editBtn) editBtn.click();
-                        }}
-                    }} else {{
-                        // This is a new region - create clip
-                        htmx.ajax('POST', '/create_clip', {{
-                            values: {{
-                                start: region.start,
-                                end: region.end
-                            }},
-                            target: 'body',
-                            swap: 'outerHTML'
-                        }});
-                    }}
-                }});
-
                 // Keyboard shortcuts
                 document.addEventListener('keydown', (e) => {{
                     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -468,7 +455,13 @@ def index():
                     switch(e.key) {{
                         case ' ':
                             e.preventDefault();
-                            wavesurfer.playPause();
+                            if (currentRegion) {{
+                                if (wavesurfer.isPlaying()) {{
+                                    wavesurfer.pause();
+                                }} else {{
+                                    currentRegion.play();
+                                }}
+                            }}
                             break;
                         case 'ArrowLeft':
                             e.preventDefault();
@@ -484,182 +477,81 @@ def index():
         """)
     )
 
-def render_clip(clip):
-    """Render a single clip element."""
-    return Div(
-        Div(
-            Div(
-                Strong(f"[{clip.start_timestamp:.2f}s - {clip.end_timestamp:.2f}s]"),
-                style="margin-bottom: 5px; color: #007bff;"
-            ),
-            Div(
-                clip.text if clip.text else "(no transcription)",
-                style="margin-bottom: 10px; " + ("color: #666; font-style: italic;" if not clip.text else "")
-            ),
-            Div(
-                Button(
-                    "▶ Play",
-                    hx_post=f"/play_clip/{clip.id}",
-                    hx_swap="none",
-                    cls="clip-btn",
-                    style="padding: 4px 8px; margin-right: 5px; font-size: 12px;"
-                ),
-                Button(
-                    "✏️ Edit",
-                    hx_get=f"/edit_clip/{clip.id}",
-                    hx_target=f"#clip-{clip.id}",
-                    hx_swap="outerHTML",
-                    data_action="edit",
-                    cls="clip-btn",
-                    style="padding: 4px 8px; margin-right: 5px; font-size: 12px;"
-                ),
-                Button(
-                    "🗑️ Delete",
-                    hx_post=f"/delete_clip/{clip.id}",
-                    hx_target="body",
-                    hx_swap="outerHTML",
-                    hx_confirm="Delete this clip?",
-                    cls="clip-btn",
-                    style="padding: 4px 8px; font-size: 12px; background: #dc3545; color: white;"
-                ),
-                (Span("⚑ MARKED", style="margin-left: 10px; color: #dc3545; font-weight: 600;") if clip.marked else None),
-                style="display: flex; align-items: center;"
-            ),
-        ),
-        id=f"clip-{clip.id}",
-        style="padding: 12px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;"
-    )
+@rt("/select_audio", methods=["POST"])
+def select_audio(audio_select: str = ''):
+    """Switch to a different audio file."""
+    if audio_select:
+        state.current_audio = audio_select
+        state.current_clip_index = 0
+    return index()
 
-@rt("/edit_clip/{clip_id:int}")
-def edit_clip_form(clip_id: int):
-    """Show edit form for a clip."""
-    clip = clips[clip_id]
-    if not clip:
-        return Div("Clip not found")
-
-    return Div(
-        Form(
-            Div(
-                Strong(f"[{clip.start_timestamp:.2f}s - {clip.end_timestamp:.2f}s]"),
-                style="margin-bottom: 10px; color: #007bff;"
-            ),
-            Textarea(
-                clip.text,
-                name="text",
-                rows="3",
-                style="width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; font-family: inherit;",
-                placeholder="Enter transcription..."
-            ),
-            Div(
-                Label(
-                    Input(type="checkbox", name="marked", checked=clip.marked),
-                    " Mark as problematic",
-                    style="margin-bottom: 10px; display: flex; align-items: center; gap: 5px;"
-                )
-            ),
-            Div(
-                Button(
-                    "💾 Save",
-                    type="submit",
-                    cls="clip-btn",
-                    style="padding: 4px 12px; margin-right: 5px; font-size: 12px; background: #28a745; color: white;"
-                ),
-                Button(
-                    "❌ Cancel",
-                    hx_get=f"/cancel_edit/{clip_id}",
-                    hx_target=f"#clip-{clip_id}",
-                    hx_swap="outerHTML",
-                    cls="clip-btn",
-                    style="padding: 4px 12px; font-size: 12px;"
-                ),
-                style="display: flex; gap: 5px;"
-            ),
-            hx_post=f"/save_clip/{clip_id}",
-            hx_target="body",
-            hx_swap="outerHTML",
-        ),
-        id=f"clip-{clip_id}",
-        style="padding: 12px; margin-bottom: 10px; border: 2px solid #007bff; border-radius: 4px; background: #fff;"
-    )
-
-@rt("/cancel_edit/{clip_id:int}")
-def cancel_edit(clip_id: int):
-    """Cancel editing and show clip normally."""
-    clip = clips[clip_id]
-    return render_clip(clip)
-
-@rt("/save_clip/{clip_id:int}", methods=["POST"])
-def save_clip(clip_id: int, text: str = "", marked: str = ""):
-    """Save clip changes."""
-    clip = clips[clip_id]
-    if clip:
+@rt("/save_current_clip", methods=["POST"])
+def save_current_clip(transcription: str = "", marked: str = ""):
+    """Save the current clip's transcription and marked status."""
+    current_clip = get_current_clip()
+    if current_clip:
         clips.update({
-            'text': text,
+            'text': transcription,
             'marked': marked == "on",
             'timestamp': datetime.now().isoformat()
-        }, clip_id)
+        }, current_clip.id)
     return index()
 
-@rt("/create_clip", methods=["POST"])
-def create_clip(start: float, end: float):
-    """Create a new clip."""
-    current_audio = state.current_audio
-    if current_audio:
-        clips.insert({
-            'audio_path': current_audio,
-            'start_timestamp': float(start),
-            'end_timestamp': float(end),
-            'text': '',
-            'username': get_username(),
-            'timestamp': datetime.now().isoformat(),
-            'marked': False
-        })
+@rt("/update_times", methods=["POST"])
+def update_times(start_time: str = "0", end_time: str = "10"):
+    """Update the current clip's start and end times."""
+    current_clip = get_current_clip()
+    if current_clip:
+        try:
+            start = float(start_time)
+            end = float(end_time)
+            if start >= 0 and end > start:
+                clips.update({
+                    'start_timestamp': start,
+                    'end_timestamp': end,
+                    'timestamp': datetime.now().isoformat()
+                }, current_clip.id)
+        except ValueError:
+            pass
     return index()
 
-@rt("/update_clip_times", methods=["POST"])
-def update_clip_times(clip_id: int, start: float, end: float):
-    """Update clip timestamps after drag/resize."""
-    clip = clips.get(int(clip_id))
-    if clip:
-        clips.update({
-            'start_timestamp': float(start),
-            'end_timestamp': float(end),
-            'timestamp': datetime.now().isoformat()
-        }, int(clip_id))
-    return Response("OK")
+@rt("/prev_clip", methods=["POST"])
+def prev_clip():
+    """Navigate to previous clip, or stay at first clip."""
+    audio_clips = get_clips_for_audio(state.current_audio)
 
-@rt("/delete_clip/{clip_id:int}", methods=["POST"])
-def delete_clip(clip_id: int):
-    """Delete a clip."""
-    clips.delete(clip_id)
+    if state.current_clip_index > 0:
+        state.current_clip_index -= 1
+
     return index()
 
-@rt("/play_clip/{clip_id:int}", methods=["POST"])
-def play_clip(clip_id: int):
-    """Play a specific clip (handled client-side via region)."""
-    return Response("OK")
+@rt("/next_clip", methods=["POST"])
+def next_clip():
+    """Navigate to next clip, auto-generating if needed."""
+    audio_clips = get_clips_for_audio(state.current_audio)
 
-@rt("/prev_audio", methods=["POST"])
-def prev_audio():
-    """Navigate to previous audio file."""
-    if state.current_index > 0:
-        state.current_index -= 1
+    # If we're at the last clip, generate a new one
+    if state.current_clip_index >= len(audio_clips) - 1:
+        last_clip = audio_clips[-1] if audio_clips else None
+        last_end = last_clip.end_timestamp if last_clip else 0
+        auto_generate_clip(state.current_audio, last_end)
+        audio_clips = get_clips_for_audio(state.current_audio)
+
+    # Move to next clip
+    state.current_clip_index += 1
+
     return index()
 
-@rt("/next_audio", methods=["POST"])
-def next_audio():
-    """Navigate to next audio file."""
-    audio_files = get_audio_files()
-    if state.current_index < len(audio_files) - 1:
-        state.current_index += 1
-    return index()
-
-@rt("/switch_folder", methods=["POST"])
-def switch_folder_endpoint(folder_select: str = ''):
-    """Switch to a different data folder."""
-    if folder_select and folder_select in get_available_folders():
-        switch_folder(folder_select)
-        print(f"Switched to folder: {folder_select}")
+@rt("/delete_current_clip", methods=["POST"])
+def delete_current_clip():
+    """Delete the current clip."""
+    current_clip = get_current_clip()
+    if current_clip:
+        clips.delete(current_clip.id)
+        # Adjust index if needed
+        audio_clips = get_clips_for_audio(state.current_audio)
+        if state.current_clip_index >= len(audio_clips) and state.current_clip_index > 0:
+            state.current_clip_index -= 1
     return index()
 
 @rt("/styles.css")
@@ -716,9 +608,9 @@ if __name__ == "__main__":
     audio_files = get_audio_files()
     print(f"  - Total audio files: {len(audio_files)}")
 
-    stats = get_progress_stats()
-    print(f"  - Audio files with clips: {stats['annotated_audio']}")
-    print(f"  - Total clips: {stats['total_clips']}")
+    if clips:
+        total_clips = len(clips())
+        print(f"  - Total clips: {total_clips}")
 
     try:
         serve(host="localhost", port=5001)
