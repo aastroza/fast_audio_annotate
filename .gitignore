@@ -36,3 +36,6 @@ new_data/
 
 # Claude
 .claude/
+
+# Audios
+audio/

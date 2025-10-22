@@ -1,874 +1,613 @@
-"""FastHTML Image Annotation Tool - Proper FastHTML implementation."""
+"""FastHTML Audio Annotation Tool - For transcription purposes."""
 from fasthtml.common import *
 from starlette.responses import FileResponse, Response
 from pathlib import Path
-import yaml
 import os
-import re
 from datetime import datetime
-from urllib.parse import urlencode, quote_plus
 from dataclasses import dataclass
 import simple_parsing as sp
+import json
 
 @dataclass
 class Config:
-    images_folder: str = sp.field(positional=True, help="The folder containing the images and annotations.db")
-    title: str = "Image Annotation Tool"
-    description: str = "Annotate images"
-    num_classes: int = 5
+    audio_folder: str = sp.field(positional=True, help="The folder containing the audio files and annotations.db")
+    title: str = "Audio Transcription Tool"
+    description: str = "Annotate audio clips with transcriptions"
     max_history: int = 10
 
 config = sp.parse(Config, config_path="./config.yaml")
 
-# Database setup - will be set after folder initialization
+# Database setup
 db = None
 
-class Annotation:
+class Clip:
     id: int
-    image_path: str
-    rating: int
+    audio_path: str
+    start_timestamp: float
+    end_timestamp: float
+    text: str
     username: str
     timestamp: str
-    marked: bool = False  # New field for marking images
-    
-annotations = None
+    marked: bool = False
 
-def switch_folder(new_folder: str):
-    """Switch to a different data folder."""
-    global config, db, annotations, state
-    
-    # Get the full path for the folder
-    folder_path = get_folder_path(new_folder)
-    if not folder_path:
-        print(f"Warning: Could not find folder path for {new_folder}")
-        return
-    
-    # Update config
-    config.images_folder = folder_path
-    
-    # Create new database connection
-    db = database(f'{config.images_folder}/annotations.db')
-    annotations = db.create(Annotation, pk='id')
-    
-    # Reset state
-    state.current_index = 0
-    state.filter_unannotated = False
-    state.filter_rating = None
-    state.history.clear()
-    state.selected.clear()
-    state.last_anchor = None
-    
-    # Set to first unannotated
-    state.current_index = find_first_unannotated()
+clips = None
 
-# Database is the single source of truth - no CSV imports needed
-
-# Initialize FastHTML app with custom styles
+# Initialize FastHTML app with custom styles and scripts
 app, rt = fast_app(
     hdrs=(
         Link(rel='stylesheet', href='/styles.css'),
+        # WaveSurfer.js and plugins
+        Script(src='https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/wavesurfer.min.js'),
+        Script(src='https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/plugins/regions.min.js'),
+        Script(src='https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/plugins/timeline.min.js'),
     ),
-    pico=False,  # We're using custom styles instead of Pico CSS
-    debug=True  # Enable debug mode to help troubleshoot
+    pico=False,
+    debug=True
 )
 
 # State management
 class AppState:
     def __init__(self):
-        self.current_index = 0
-        self.filter_unannotated = False
-        self.filter_rating = None  # Filter by specific rating (1-5) or None for no filter
+        self.current_audio = None  # Path to current audio file
+        self.current_clip_index = 0  # Index of current clip being edited
+        self.audio_duration = 0  # Duration of current audio in seconds
         self.history = []
-        self.selected = set()  # set of image relative paths
-        self.last_anchor = None  # last clicked image for shift-selection
 
 state = AppState()
 
 # Helper functions
-def get_image_files():
-    """Get all image files from the configured directory."""
-    images_dir = Path(config.images_folder)
-    images = []
-    if images_dir.exists():
-        for ext in ['.jpg', '.jpeg', '.png']:
-            images.extend(images_dir.rglob(f"*{ext}"))
-            images.extend(images_dir.rglob(f"*{ext.upper()}"))
-    # Return paths relative to the images folder
-    return sorted([img.relative_to(images_dir) for img in images])
-
-def find_annotation_folders(search_dir: Path = None):
-    """Find all folders containing annotations.db files in the immediate subdirectories only."""
-    if search_dir is None:
-        search_dir = Path(".")
-    
-    annotation_folders = []
-    
-    # Only search immediate subdirectories, not recursively
-    try:
-        for item in search_dir.iterdir():
-            if item.is_dir() and (item / "annotations.db").exists():
-                try:
-                    rel_path = item.relative_to(search_dir)
-                    annotation_folders.append({
-                        "name": str(rel_path),
-                        "path": str(item)
-                    })
-                except ValueError:
-                    continue
-    except (PermissionError, OSError):
-        pass
-    
-    return sorted(annotation_folders, key=lambda x: x["name"])
-
-def get_available_folders():
-    """Get all available annotation folders."""
-    if hasattr(config, 'images_folder') and config.images_folder and Path(config.images_folder).exists():
-        current_folder = Path(config.images_folder)
-        parent_dir = current_folder.parent
-        
-        annotation_folders = find_annotation_folders(parent_dir)
-        return [f["name"] for f in annotation_folders]
-    
-    # Fallback: look in common locations
-    for search_path in [Path("data"), Path(".")]:
-        if search_path.exists():
-            annotation_folders = find_annotation_folders(search_path)
-            if annotation_folders:
-                return [f["name"] for f in annotation_folders]
-    
-    return []
-
-def get_folder_path(folder_name: str):
-    """Get the full path for a folder name."""
-    # Check current folder's parent first
-    if hasattr(config, 'images_folder') and config.images_folder and Path(config.images_folder).exists():
-        current_folder = Path(config.images_folder)
-        parent_dir = current_folder.parent
-        
-        annotation_folders = find_annotation_folders(parent_dir)
-        for folder in annotation_folders:
-            if folder["name"] == folder_name:
-                return folder["path"]
-    
-    # Fallback: search in common locations
-    for search_path in [Path("data"), Path(".")]:
-        if search_path.exists():
-            annotation_folders = find_annotation_folders(search_path)
-            for folder in annotation_folders:
-                if folder["name"] == folder_name:
-                    return folder["path"]
-    
-    return None
+def get_audio_files():
+    """Get all audio files from the configured directory (deduplicated)."""
+    audio_dir = Path(config.audio_folder)
+    audio_files_set = set()
+    if audio_dir.exists():
+        for ext in ['.webm', '.mp3', '.wav', '.ogg', '.m4a', '.flac']:
+            # Search case-insensitively but only add each file once
+            for audio_file in audio_dir.rglob(f"*{ext}"):
+                audio_files_set.add(audio_file)
+            for audio_file in audio_dir.rglob(f"*{ext.upper()}"):
+                audio_files_set.add(audio_file)
+    # Return sorted list of relative paths
+    return sorted([audio.relative_to(audio_dir) for audio in audio_files_set])
 
 def get_username():
     """Get current username."""
     return os.environ.get('USER') or os.environ.get('USERNAME') or 'unknown'
 
-def get_current_image():
-    """Get current image based on state."""
-    images = get_image_files()
-    if not images:
+def get_clips_for_audio(audio_path):
+    """Get all clips for a specific audio file, sorted by start time."""
+    if not audio_path:
+        return []
+    return sorted(
+        clips("audio_path=?", (str(audio_path),)),
+        key=lambda c: c.start_timestamp
+    )
+
+def auto_generate_clip(audio_path, last_end_time=0):
+    """Auto-generate a 10-second clip starting from last_end_time."""
+    start = last_end_time
+    end = start + 10.0
+
+    new_clip = clips.insert({
+        'audio_path': str(audio_path),
+        'start_timestamp': start,
+        'end_timestamp': end,
+        'text': '',
+        'username': get_username(),
+        'timestamp': datetime.now().isoformat(),
+        'marked': False
+    })
+    return new_clip
+
+def get_current_clip():
+    """Get the current clip being edited, auto-generating if needed."""
+    if not state.current_audio:
         return None
-    
-    if state.filter_unannotated:
-        # Find next unannotated image from current position
-        annotated_images = {a.image_path for a in annotations()}
-        for i in range(state.current_index, len(images)):
-            if str(images[i]) not in annotated_images:
-                return images[i]
-        # Try from beginning if nothing found after current position
-        for i in range(0, state.current_index):
-            if str(images[i]) not in annotated_images:
-                state.current_index = i
-                return images[i]
-        return None
-    
-    if state.filter_rating is not None:
-        # Find next image with specific rating from current position
-        rating_images = {a.image_path: a.rating for a in annotations() if a.rating == state.filter_rating}
-        for i in range(state.current_index, len(images)):
-            if str(images[i]) in rating_images:
-                return images[i]
-        # Try from beginning if nothing found after current position
-        for i in range(0, state.current_index):
-            if str(images[i]) in rating_images:
-                state.current_index = i
-                return images[i]
-        return None
-    
-    if 0 <= state.current_index < len(images):
-        return images[state.current_index]
-    return None
+
+    audio_clips = get_clips_for_audio(state.current_audio)
+
+    # If no clips exist, create the first one
+    if not audio_clips:
+        new_clip = auto_generate_clip(state.current_audio, 0)
+        state.current_clip_index = 0
+        return new_clip
+
+    # Ensure current_clip_index is valid
+    if state.current_clip_index >= len(audio_clips):
+        state.current_clip_index = len(audio_clips) - 1
+    elif state.current_clip_index < 0:
+        state.current_clip_index = 0
+
+    return audio_clips[state.current_clip_index]
 
 def get_progress_stats():
     """Calculate progress statistics."""
-    images = get_image_files()
-    total = len(images)
-    all_annotations = annotations()
-    # Consider any existing annotation record as annotated, including rating=0
-    annotated_count = len(set(a.image_path for a in all_annotations))
-    marked_count = len([a for a in all_annotations if getattr(a, 'marked', False)])
-    
+    audio_files = get_audio_files()
+    total_audio = len(audio_files)
+
+    if not state.current_audio:
+        return {
+            'total_audio': total_audio,
+            'current_audio_index': 0,
+            'total_clips': 0,
+            'current_clip_num': 0,
+            'marked_clips': 0
+        }
+
+    # Find current audio index
+    try:
+        current_audio_index = audio_files.index(Path(state.current_audio)) + 1
+    except (ValueError, AttributeError):
+        current_audio_index = 1
+
+    # Count clips for current audio
+    audio_clips = get_clips_for_audio(state.current_audio)
+    total_clips = len(audio_clips)
+    current_clip_num = state.current_clip_index + 1
+    marked_clips = len([c for c in audio_clips if c.marked])
+
     return {
-        'total': total,
-        'annotated': annotated_count,
-        'marked': marked_count,
-        'remaining': total - annotated_count,
-        'percentage': round(100 * annotated_count / total) if total > 0 else 0
+        'total_audio': total_audio,
+        'current_audio_index': current_audio_index,
+        'total_clips': total_clips,
+        'current_clip_num': current_clip_num,
+        'marked_clips': marked_clips
     }
 
-def get_annotation_for_image(image_path):
-    """Get annotation data for a specific image, including existence flag."""
-    # Use parameterized query - image_path should be the relative path string
-    result = annotations("image_path=?", (str(image_path),), limit=1)
-    if result:
-        return {
-            'rating': result[0].rating,
-            'marked': getattr(result[0], 'marked', False),
-            'exists': True
-        }
-    return {'rating': 0, 'marked': False, 'exists': False}
+def render_main_content():
+    """Render the main content area (for HTMX swapping)."""
+    audio_files = get_audio_files()
+    current_clip = get_current_clip()
+    stats = get_progress_stats()
 
-def index_of_image(image_name: str) -> int:
-    """Return index of an image (relative path str) in the image list, or -1."""
-    imgs = get_image_files()
-    for i, p in enumerate(imgs):
-        if str(p) == image_name:
-            return i
-    return -1
+    return Div(
+        # Audio file selector
+        Div(
+            Label("Audio File:", style="margin-right: 10px; font-weight: 600;"),
+            Select(
+                *[Option(str(audio), value=str(audio), selected=(str(audio) == state.current_audio))
+                  for audio in audio_files],
+                name="audio_select",
+                hx_post="/select_audio",
+                hx_target="#main-content",
+                hx_swap="outerHTML",
+                hx_trigger="change",
+                style="flex: 1; padding: 8px 12px; border-radius: 6px; border: 2px solid #007bff; background: white; font-size: 14px;"
+            ),
+            style="display: flex; align-items: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;"
+        ),
 
-def get_annotations_map():
-    """Map of image_path -> {'rating': int, 'marked': bool}."""
-    amap = {}
-    for a in annotations():
-        amap[a.image_path] = {'rating': a.rating, 'marked': getattr(a, 'marked', False)}
-    return amap
+        # Progress section
+        Div(
+            Div(
+                f"Audio {stats['current_audio_index']} of {stats['total_audio']} | ",
+                f"Clip {stats['current_clip_num']} of {stats['total_clips']} | ",
+                f"Marked: {stats['marked_clips']}",
+                cls="progress"
+            ),
+        ),
 
-def _filtered_items(q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name'):
-    """Return filtered and sorted list of (Path, rating, marked) across entire dataset."""
-    q = (q or '').strip()
-    rating_val = int(rating) if str(rating).isdigit() else None
-    show = (show or 'all')
-    marked_only = (marked == 'on' or marked == 'true' or marked == '1')
+        # Current audio filename
+        Div(f"File: {state.current_audio}", cls="progress", style="font-weight: 500; margin-bottom: 15px;"),
 
-    imgs = get_image_files()
-    amap = get_annotations_map()
+        # Waveform container
+        Div(
+            id="waveform",
+            style="width: 100%; height: 128px; margin-bottom: 15px; background: #f0f0f0; border-radius: 4px;"
+        ),
 
-    items = []
-    for p in imgs:
-        sp = str(p)
-        ann = amap.get(sp, {'rating': 0, 'marked': False})
-        r = ann['rating']
-        m = ann['marked']
-        has_ann = (sp in amap)
-        if q and q.lower() not in sp.lower():
-            continue
-        if rating_val is not None and r != rating_val:
-            continue
-        if show == 'annotated' and not has_ann:
-            continue
-        if show == 'unannotated' and has_ann:
-            continue
-        if marked_only and not m:
-            continue
-        items.append((p, r, m))
+        # Timeline container
+        Div(
+            id="timeline",
+            style="width: 100%; margin-bottom: 20px;"
+        ),
 
-    # Sort
-    if sort == 'name_desc':
-        items.sort(key=lambda t: str(t[0]).lower(), reverse=True)
-    elif sort == 'rating_desc':
-        items.sort(key=lambda t: (t[1], str(t[0]).lower()), reverse=True)
-    elif sort == 'rating_asc':
-        items.sort(key=lambda t: (t[1], str(t[0]).lower()))
-    elif sort == 'marked_first':
-        items.sort(key=lambda t: (not t[2], str(t[0]).lower()))
-    else:  # name
-        items.sort(key=lambda t: str(t[0]).lower())
-    return items
+        # Playback controls
+        Div(
+            Button("▶ Play Clip", id="play-btn", cls="control-btn", style="padding: 12px 24px; font-size: 16px;"),
+            Button("⏸ Pause", id="pause-btn", cls="control-btn", style="padding: 12px 24px; font-size: 16px;"),
+            Button("⏹ Stop", id="stop-btn", cls="control-btn", style="padding: 12px 24px; font-size: 16px;"),
+            Label("Speed:", style="margin-left: 20px; font-weight: 500;"),
+            Select(
+                Option("0.5x", value="0.5"),
+                Option("0.75x", value="0.75"),
+                Option("1x", value="1", selected=True),
+                Option("1.25x", value="1.25"),
+                Option("1.5x", value="1.5"),
+                Option("2x", value="2"),
+                id="speed-select",
+                style="padding: 8px; margin-left: 5px;"
+            ),
+            style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 25px; padding: 15px; background: #f8f9fa; border-radius: 8px;"
+        ),
 
-def render_browser_grid(q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1', per_page: int = 60):
-    """Return a Div containing a responsive grid of images, filtered and paginated."""
-    # Normalize inputs
-    try:
-        page_i = max(1, int(page or '1'))
-    except Exception:
-        page_i = 1
-    items = _filtered_items(q=q, rating=rating, show=show, marked=marked, sort=sort)
+        # Current clip editor
+        Div(
+            H3(f"Clip {stats['current_clip_num']}", style="margin-bottom: 15px; color: #007bff;"),
 
-    total = len(items)
-    start = (page_i - 1) * per_page
-    end = start + per_page
-    page_items = items[start:end]
-    total_pages = max(1, (total + per_page - 1) // per_page)
-
-    def badge(content, cls):
-        return Span(content, cls=cls)
-
-    # Build grid cells
-    cells = []
-    for p, r, m in page_items:
-        sp = str(p)
-        badges = []
-        if r and r > 0:
-            badges.append(badge(f"★ {r}", 'rating-badge'))
-        # Marked status will be shown as a banner overlay instead of a small badge
-
-        # Action buttons: Open in annotator (explicit), click tile toggles selection
-        qstr = urlencode({'image': str(sp)})
-        open_btn = A("Open", href=f"/annotate?{qstr}", cls="grid-open")
-
-        selected_cls = ' selected' if sp in state.selected else ''
-        marked_cls = ' marked' if m else ''
-
-        cells.append(
+            # Timestamp controls
             Div(
                 Div(
-                    Img(src=f"/{config.images_folder}/{sp}", alt=sp, cls="grid-img"),
-                    Div(*badges, cls="grid-badges"),
-                    (Div("⚑ MARKED", cls="marked-banner") if m else None),
-                    Div("✓", cls="select-check"),
-                    cls=f"grid-thumb{selected_cls}{marked_cls}",
-                    hx_post="/toggle_select",
-                    hx_target="#browse-grid",
-                    hx_swap="outerHTML",
-                    hx_include=".browser-filters *",
-                    hx_vals=f"js:{{image: '{sp}', shift: event.shiftKey}}"
+                    Label("Start (seconds):", style="display: block; margin-bottom: 5px; font-weight: 500;"),
+                    Input(
+                        type="number",
+                        name="start_time",
+                        value=f"{current_clip.start_timestamp:.2f}" if current_clip else "0.00",
+                        step="0.01",
+                        min="0",
+                        id="start-time-input",
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"
+                    ),
+                    style="flex: 1;"
                 ),
-                Div(sp, cls="grid-name"),
-                Div(open_btn, cls="grid-actions"),
-                cls=f"grid-item{selected_cls}{marked_cls}"
-            )
-        )
-
-    # Pagination controls
-    prev_disabled = page_i <= 1
-    next_disabled = page_i >= total_pages
-    # Keep other filters when paging
-    def page_btn(label, new_page, disabled):
-        params = {
-            'q': q,
-            'rating': rating or '',
-            'show': show,
-            'marked': 'on' if (marked in ('on','true','1')) else '',
-            'sort': sort,
-            'page': str(new_page)
-        }
-        return Button(
-            label,
-            disabled=disabled,
-            hx_get=f"/browse_grid?{urlencode(params)}",
-            hx_target="#browse-grid",
-            hx_swap="outerHTML",
-            cls="page-btn"
-        )
-
-    showing_from = (start + 1) if total > 0 else 0
-    showing_to = min(end, total)
-    grid = Div(
-        Div(
-            f"Showing {showing_from}–{showing_to} of {total} images",
-            Div(
-                page_btn("← Prev", page_i - 1, prev_disabled),
-                Span(f"Page {page_i}/{total_pages}", cls="page-info"),
-                page_btn("Next →", page_i + 1, next_disabled),
-                cls="pager"
+                Div(
+                    Label("End (seconds):", style="display: block; margin-bottom: 5px; font-weight: 500;"),
+                    Input(
+                        type="number",
+                        name="end_time",
+                        value=f"{current_clip.end_timestamp:.2f}" if current_clip else "10.00",
+                        step="0.01",
+                        min="0",
+                        id="end-time-input",
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"
+                    ),
+                    style="flex: 1;"
+                ),
+                Button(
+                    "Update Times",
+                    hx_post="/update_times",
+                    hx_include="#start-time-input, #end-time-input",
+                    hx_target="#main-content",
+                    hx_swap="outerHTML",
+                    cls="update-btn",
+                    style="align-self: flex-end; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;"
+                ),
+                style="display: flex; gap: 15px; margin-bottom: 20px;"
             ),
-            cls="grid-meta"
+
+            # Transcription text area
+            Div(
+                Label("Transcription:", style="display: block; margin-bottom: 8px; font-weight: 500; font-size: 16px;"),
+                Textarea(
+                    current_clip.text if current_clip and current_clip.text else "",
+                    name="transcription",
+                    id="transcription-input",
+                    rows="6",
+                    placeholder="Enter transcription for this clip...",
+                    style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 4px; font-family: inherit; font-size: 14px; resize: vertical;"
+                ),
+                style="margin-bottom: 15px;"
+            ),
+
+            # Mark as problematic
+            Div(
+                Label(
+                    Input(
+                        type="checkbox",
+                        name="marked",
+                        id="marked-input",
+                        checked=current_clip.marked if current_clip else False
+                    ),
+                    " Mark as problematic",
+                    style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;"
+                ),
+                style="margin-bottom: 20px;"
+            ),
+
+            # Save button
+            Button(
+                "💾 Save Clip",
+                hx_post="/save_current_clip",
+                hx_include="#transcription-input, #marked-input",
+                hx_target="#main-content",
+                hx_swap="outerHTML",
+                cls="save-btn",
+                style="width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 600;"
+            ),
+
+            style="padding: 20px; background: #f9f9f9; border: 2px solid #007bff; border-radius: 8px; margin-bottom: 20px;"
         ),
-        Div(*cells, cls="grid"),
-        id="browse-grid"
+
+        # Navigation controls
+        Div(
+            Button(
+                "← Previous Clip",
+                cls="nav-btn",
+                hx_post="/prev_clip",
+                hx_target="#main-content",
+                hx_swap="outerHTML",
+                style="flex: 1;"
+            ),
+            Button(
+                "Delete Clip",
+                hx_post="/delete_current_clip",
+                hx_target="#main-content",
+                hx_swap="outerHTML",
+                hx_confirm="Delete this clip?",
+                cls="delete-btn",
+                style="background: #dc3545; color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer;"
+            ),
+            Button(
+                "Next Clip →",
+                cls="nav-btn",
+                hx_post="/next_clip",
+                hx_target="#main-content",
+                hx_swap="outerHTML",
+                style="flex: 1;"
+            ),
+            cls="nav-controls",
+            style="display: flex; gap: 10px; justify-content: center;"
+        ),
+
+        id="main-content",
+        # Add data attributes for WaveSurfer initialization
+        **{
+            'data-audio-path': str(state.current_audio),
+            'data-clip-start': str(current_clip.start_timestamp if current_clip else 0),
+            'data-clip-end': str(current_clip.end_timestamp if current_clip else 10),
+        }
     )
-    return grid
 
 @rt("/")
 def index():
-    """Main annotation interface."""
-    # Check if we have a valid images_folder
-    if not hasattr(config, 'images_folder') or not config.images_folder or not Path(config.images_folder).exists():
-        # No valid folder - show folder selection interface
-        available_folders = get_available_folders()
+    """Main audio annotation interface."""
+    audio_files = get_audio_files()
+
+    if not audio_files:
         return Titled(config.title,
             Div(
-                H2("Select a Folder to Start Annotating", style="text-align: center; margin-bottom: 30px;"),
-                Div(
-                    "Please select a folder containing an annotations.db file to begin.",
-                    style="text-align: center; margin-bottom: 30px; color: #666;"
-                ),
-                Div(
-                    *[Div(
-                        Span(f"📁 {folder}", style="flex: 1;"),
-                        Button(
-                            "Select",
-                            hx_post="/switch_folder",
-                            hx_vals=f"js:{{folder_select: '{folder}'}}",
-                            hx_target="body",
-                            hx_swap="outerHTML",
-                            style="padding: 6px 12px; border-radius: 4px; border: 1px solid #007bff; background: #007bff; color: white; cursor: pointer;"
-                        ),
-                        style="display: flex; align-items: center; justify-content: space-between; padding: 10px; margin-bottom: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;"
-                    ) for folder in available_folders[:10]],  # Show first 10 folders
-                    style="max-width: 600px; margin: 0 auto;"
-                ),
+                H2("No Audio Files Found", style="text-align: center; margin-bottom: 20px;"),
+                P(f"Please add audio files to the '{config.audio_folder}/' directory.",
+                  style="text-align: center; color: #666;"),
+                P("Supported formats: .webm, .mp3, .wav, .ogg, .m4a, .flac",
+                  style="text-align: center; color: #999; font-size: 14px;"),
                 style="max-width: 800px; margin: 2rem auto; padding: 2rem; background: white; border-radius: 8px;"
             )
         )
-    
-    images = get_image_files()
-    if not images:
-        return Titled(config.title,
-            Div(f"No images found in {config.images_folder}/ directory", 
-                style="max-width: 800px; margin: 2rem auto; padding: 2rem; background: white; border-radius: 8px;")
-        )
-    
-    current_image = get_current_image()
-    if not current_image:
-        # If no current image, reset to first image to keep UI functional
-        state.current_index = 0
-        current_image = get_current_image()
-    
-    annotation_data = get_annotation_for_image(current_image)
-    current_rating = annotation_data['rating']
-    is_marked = annotation_data['marked']
-    has_annotation = annotation_data.get('exists', False)
-    stats = get_progress_stats()
-    
+
+    # Set default audio if none selected
+    if not state.current_audio:
+        state.current_audio = str(audio_files[0])
+        state.current_clip_index = 0
+
     return Titled(config.title,
         Div(
-            # Folder selection section
-            Div(
-                Div(
-                    Label("Choose Folder:", style="margin-right: 10px; font-weight: 600;"),
-                    Select(
-                        *[Option(folder, value=folder, selected=(get_folder_path(folder) == config.images_folder)) 
-                          for folder in get_available_folders()],
-                        name="folder_select",
-                        hx_post="/switch_folder",
-                        hx_target="body",
-                        hx_swap="outerHTML",
-                        hx_trigger="change",
-                        cls="folder-select",
-                        style="padding: 8px 12px; border-radius: 6px; border: 2px solid #007bff; background: white; font-size: 14px; min-width: 300px;"
-                    ),
-                    Input(
-                        type="file",
-                        webkitdirectory=True,
-                        directory=True,
-                        name="folder_browser",
-                        hx_post="/browse_folder",
-                        hx_target="body",
-                        hx_swap="outerHTML", 
-                        hx_trigger="change",
-                        cls="folder-browser",
-                        style="margin-left: 10px;"
-                    ),
-                    style="display: flex; align-items: center; justify-content: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;"
-                ),
-                cls="folder-section"
-            ),
-            
-            # Progress section
-            Div(
-                Div(
-                    f"Image {state.current_index + 1} of {stats['total']} | ",
-                    f"Annotated: {stats['annotated']}/{stats['total']} ({stats['percentage']}%) | ",
-                    f"Marked: {stats['marked']} | ",
-                    Span(f"📁 {config.images_folder}", cls="folder-name"),
-                    cls="progress"
-                ),
-                Div(
-                    A("Browse Dataset", href="/browse", cls="browse-link"),
-                    cls="progress"
-                ),
-                Div(
-                    Div(style=f"width: {stats['percentage']}%", cls="progress-fill"),
-                    cls="progress-bar"
-                ),
-                Div(
-                    Label(
-                        Input(
-                            type="checkbox",
-                            checked=state.filter_unannotated,
-                            hx_post="/toggle_filter",
-                            hx_target="body",
-                            hx_swap="outerHTML",
-                            cls="filter-checkbox"
-                        ),
-                        " Show unannotated only",
-                        cls="filter-label"
-                    ),
-                    Div(
-                        Label("Filter by rating:", style="margin-right: 10px; font-weight: 500;"),
-                        Select(
-                            Option("All ratings", value="", selected=state.filter_rating is None),
-                            *[Option(f"Rating {i}", value=str(i), selected=state.filter_rating == i)
-                              for i in range(0, config.num_classes)],
-                            name="rating_filter_select",
-                            hx_post="/filter_rating",
-                            hx_target="body",
-                            hx_swap="outerHTML",
-                            hx_trigger="change",
-                            cls="rating-filter-select",
-                            style="padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd;"
-                        ),
-                        style="margin-top: 10px;"
-                    ),
-                    cls="filter-container"
-                )
-            ),
-            
-            # Current image info
-            Div(f"Current: {current_image}", cls="progress"),
-            
-            # Image display
-            Div(
-                Img(src=f"/{config.images_folder}/{current_image}", alt=str(current_image)),
-                cls="image-container"
-            ),
-            
-            # Description if present
-            Div(config.description, cls="description") if config.description else None,
-            
-            # Controls section
-            Div(
-                Div(
-                    f"Current Rating: ",
-                    Span(current_rating if has_annotation else 'Not rated'),
-                    cls="current-rating"
-                ),
-                
-                # Rating buttons and mark checkbox in same row
-                Div(
-                    Div(
-                        *[Button(
-                            str(i),
-                            cls=f"rating-btn {'active' if (current_rating == i and has_annotation) else ''}",
-                            hx_post=f"/rate/{i}",
-                            hx_target="body",
-                            hx_swap="outerHTML"
-                        ) for i in range(0, config.num_classes)],
-                        cls="rating-buttons"
-                    ),
-                    Div(
-                        Label(
-                            Input(
-                                type="checkbox",
-                                checked=is_marked,
-                                hx_post="/mark",
-                                hx_target="body",
-                                hx_swap="outerHTML",
-                                cls="mark-checkbox",
-                                id="mark-checkbox"
-                            ),
-                            " Mark Image (X)",
-                            cls="mark-label",
-                            style="color: #dc3545; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; margin-left: 20px;"
-                        )
-                    ),
-                    style="display: flex; align-items: center; justify-content: center; gap: 10px;"
-                ),
-                
-                # Navigation controls
-                Div(
-                    Button(
-                        "← Previous", cls="nav-btn",
-                        hx_post="/prev",
-                        hx_target="body",
-                        hx_swap="outerHTML",
-                        disabled=state.current_index == 0
-                    ),
-                    Button(
-                        "Undo (U)", cls="nav-btn undo-btn",
-                        hx_post="/undo",
-                        hx_target="body",
-                        hx_swap="outerHTML",
-                        disabled=len(state.history) == 0
-                    ),
-                    Button(
-                        "🗑️ Delete Image (D)", cls="nav-btn delete-btn",
-                        hx_post="/delete",
-                        hx_target="body",
-                        hx_swap="outerHTML",
-                        style="background-color: #dc3545; color: white; font-weight: bold;"
-                    ),
-                    Button(
-                        "Next →", cls="nav-btn",
-                        hx_post="/next",
-                        hx_target="body",
-                        hx_swap="outerHTML",
-                        disabled=state.current_index >= len(images) - 1
-                    ),
-                    cls="nav-controls"
-                ),
-                
-                # Help text
-                Div(
-                    "Keyboard shortcuts: ",
-                    Span(f"0-{max(0, config.num_classes - 1)}", cls="kbd"), " rate & next | ",
-                    Span("←→", cls="kbd"), " navigate | ",
-                    Span("U", cls="kbd"), " undo | ",
-                    Span("D", cls="kbd"), " delete | ",
-                Span("X", cls="kbd"), " mark/unmark",
-                    cls="help-text"
-                ),
-                cls="controls"
-            ),
+            render_main_content(),
             cls="container"
         ),
-        Script(f"""
-            // Simple HTMX-based keyboard shortcuts
-            document.addEventListener('keydown', function(e) {{
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-                
-                // Number keys for rating (with navigation)
-                if (e.key >= '1' && e.key <= '{config.num_classes - 1}') {{
-                    htmx.ajax('POST', '/rate_and_next/' + e.key, {{
-                        target: 'body',
-                        swap: 'outerHTML'
-                    }});
-                    e.preventDefault();
-                    return;
-                }}
-                // Allow rating 0 via keyboard
-                if (e.key === '0') {{
-                    htmx.ajax('POST', '/rate_and_next/0', {{
-                        target: 'body',
-                        swap: 'outerHTML'
-                    }});
-                    e.preventDefault();
-                    return;
-                }}
-                
-                // Navigation shortcuts - trigger HTMX on existing buttons
-                let targetBtn = null;
-                switch(e.key) {{
-                    case 'ArrowLeft':
-                        targetBtn = document.querySelector('button[hx-post="/prev"]');
-                        break;
-                    case 'ArrowRight':
-                        targetBtn = document.querySelector('button[hx-post="/next"]');
-                        break;
-                    case 'u': case 'U':
-                        targetBtn = document.querySelector('button[hx-post="/undo"]');
-                        break;
-                    case 'd': case 'D':
-                        targetBtn = document.querySelector('button[hx-post="/delete"]');
-                        break;
-            case 'x': case 'X':
-                targetBtn = document.querySelector('#mark-checkbox');
-                break;
-            }}
-                
-                if (targetBtn && !targetBtn.disabled) {{
-                    htmx.trigger(targetBtn, 'click');
-                    e.preventDefault();
-                }}
-            }});
+
+        # WaveSurfer.js initialization script
+        Script("""
+            let wavesurfer = null;
+            let wsRegions = null;
+            let currentRegion = null;
+
+            function initWaveSurfer() {
+                // Destroy existing instance if any
+                if (wavesurfer) {
+                    wavesurfer.destroy();
+                }
+
+                // Get data from main-content element
+                const mainContent = document.getElementById('main-content');
+                if (!mainContent) return;
+
+                const audioPath = mainContent.dataset.audioPath;
+                const clipStart = parseFloat(mainContent.dataset.clipStart);
+                const clipEnd = parseFloat(mainContent.dataset.clipEnd);
+
+                // Initialize WaveSurfer
+                wavesurfer = WaveSurfer.create({
+                    container: '#waveform',
+                    waveColor: '#4F4A85',
+                    progressColor: '#383351',
+                    height: 128,
+                    barWidth: 2,
+                    barGap: 1,
+                    barRadius: 2,
+                    responsive: true,
+                });
+
+                // Add regions plugin
+                wsRegions = wavesurfer.registerPlugin(WaveSurfer.Regions.create());
+
+                // Add timeline plugin
+                wavesurfer.registerPlugin(WaveSurfer.Timeline.create({
+                    container: '#timeline',
+                }));
+
+                // Load audio file
+                wavesurfer.load('""" + f"/{config.audio_folder}/" + """' + audioPath);
+
+                wavesurfer.on('ready', () => {
+                    // Clear any existing regions
+                    wsRegions.clearRegions();
+
+                    // Add current clip region
+                    currentRegion = wsRegions.addRegion({
+                        start: clipStart,
+                        end: clipEnd,
+                        color: 'rgba(0, 123, 255, 0.3)',
+                        drag: true,
+                        resize: true,
+                    });
+
+                    // Update input fields when region is dragged/resized
+                    currentRegion.on('update', () => {
+                        const startInput = document.getElementById('start-time-input');
+                        const endInput = document.getElementById('end-time-input');
+                        if (startInput) startInput.value = currentRegion.start.toFixed(2);
+                        if (endInput) endInput.value = currentRegion.end.toFixed(2);
+                    });
+                });
+
+                // Update region when input fields change
+                const startInput = document.getElementById('start-time-input');
+                const endInput = document.getElementById('end-time-input');
+
+                if (startInput) {
+                    startInput.addEventListener('input', (e) => {
+                        if (currentRegion) {
+                            const start = parseFloat(e.target.value) || 0;
+                            const end = currentRegion.end;
+                            currentRegion.setOptions({ start, end });
+                        }
+                    });
+                }
+
+                if (endInput) {
+                    endInput.addEventListener('input', (e) => {
+                        if (currentRegion) {
+                            const start = currentRegion.start;
+                            const end = parseFloat(e.target.value) || 10;
+                            currentRegion.setOptions({ start, end });
+                        }
+                    });
+                }
+
+                // Playback controls - play only current clip
+                const playBtn = document.getElementById('play-btn');
+                const pauseBtn = document.getElementById('pause-btn');
+                const stopBtn = document.getElementById('stop-btn');
+                const speedSelect = document.getElementById('speed-select');
+
+                if (playBtn) {
+                    playBtn.addEventListener('click', () => {
+                        if (currentRegion) {
+                            currentRegion.play();
+                        }
+                    });
+                }
+
+                if (pauseBtn) {
+                    pauseBtn.addEventListener('click', () => {
+                        wavesurfer.pause();
+                    });
+                }
+
+                if (stopBtn) {
+                    stopBtn.addEventListener('click', () => {
+                        wavesurfer.stop();
+                    });
+                }
+
+                if (speedSelect) {
+                    speedSelect.addEventListener('change', (e) => {
+                        wavesurfer.setPlaybackRate(parseFloat(e.target.value));
+                    });
+                }
+
+                // Keyboard shortcuts
+                document.addEventListener('keydown', (e) => {
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+                    switch(e.key) {
+                        case ' ':
+                            e.preventDefault();
+                            if (currentRegion) {
+                                if (wavesurfer.isPlaying()) {
+                                    wavesurfer.pause();
+                                } else {
+                                    currentRegion.play();
+                                }
+                            }
+                            break;
+                        case 'ArrowLeft':
+                            e.preventDefault();
+                            wavesurfer.skip(-2);
+                            break;
+                        case 'ArrowRight':
+                            e.preventDefault();
+                            wavesurfer.skip(2);
+                            break;
+                    }
+                });
+            }
+
+            // Initialize on page load
+            document.addEventListener('DOMContentLoaded', initWaveSurfer);
+
+            // Re-initialize after HTMX swap
+            document.body.addEventListener('htmx:afterSwap', function(event) {
+                if (event.detail.target.id === 'main-content') {
+                    initWaveSurfer();
+                }
+            });
         """)
     )
 
-@rt("/browse")
-def browse(q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1'):
-    """Dataset browser: filter and review images and annotations."""
-    stats = get_progress_stats()
-    grid = render_browser_grid(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
+@rt("/select_audio", methods=["POST"])
+def select_audio(audio_select: str = ''):
+    """Switch to a different audio file."""
+    if audio_select:
+        state.current_audio = audio_select
+        state.current_clip_index = 0
+    return render_main_content()
 
-    # Filter form controls submit via HTMX to update only the grid
-    filter_form = Form(
-        Div(
-            Input(type="search", name="q", placeholder="Search filename…", value=q or '',
-                  hx_get="/browse_grid", hx_target="#browse-grid", hx_trigger="keyup changed delay:300ms", hx_swap="outerHTML", cls="filter-input"),
-            Select(
-                Option("All ratings", value="", selected=(not rating)),
-                *[Option(f"Rating {i}", value=str(i), selected=(rating == str(i))) for i in range(0, config.num_classes)],
-                name="rating", hx_get="/browse_grid", hx_target="#browse-grid", hx_trigger="change", hx_swap="outerHTML", cls="filter-select"
-            ),
-            Select(
-                Option("All", value="all", selected=(show == 'all')),
-                Option("Annotated", value="annotated", selected=(show == 'annotated')),
-                Option("Unannotated", value="unannotated", selected=(show == 'unannotated')),
-                name="show", hx_get="/browse_grid", hx_target="#browse-grid", hx_trigger="change", hx_swap="outerHTML", cls="filter-select"
-            ),
-            Label(
-                Input(type="checkbox", name="marked", checked=(marked in ('on','true','1')),
-                      hx_get="/browse_grid", hx_target="#browse-grid", hx_trigger="change", hx_swap="outerHTML"),
-                Span("Marked only", cls="filter-label"),
-                cls="filter-check"
-            ),
-            Select(
-                Option("Name ↑", value="name", selected=(sort == 'name')),
-                Option("Name ↓", value="name_desc", selected=(sort == 'name_desc')),
-                Option("Rating ↑", value="rating_asc", selected=(sort == 'rating_asc')),
-                Option("Rating ↓", value="rating_desc", selected=(sort == 'rating_desc')),
-                Option("Marked first", value="marked_first", selected=(sort == 'marked_first')),
-                name="sort", hx_get="/browse_grid", hx_target="#browse-grid", hx_trigger="change", hx_swap="outerHTML", cls="filter-select"
-            ),
-            A("Reset", href="/browse", cls="filter-reset"),
-            cls="browser-filters"
-        )
-    )
+@rt("/save_current_clip", methods=["POST"])
+def save_current_clip(transcription: str = "", marked: str = ""):
+    """Save the current clip's transcription and marked status."""
+    current_clip = get_current_clip()
+    if current_clip:
+        clips.update({
+            'text': transcription,
+            'marked': marked == "on",
+            'timestamp': datetime.now().isoformat()
+        }, current_clip.id)
+    return render_main_content()
 
-    # Selection toolbar
-    sel_count = len(state.selected)
-    selection_bar = Div(
-        Div(f"Selected: {sel_count}", cls="sel-count"),
-        Div(
-            Select(
-                Option("Set rating…", value=""),
-                *[Option(f"{i}", value=str(i)) for i in range(0, config.num_classes)],
-                name="set_rating", cls="filter-select"
-            ),
-            Button("Apply", cls="page-btn",
-                   hx_post="/batch_rate", hx_target="body", hx_swap="outerHTML", hx_include="[name='set_rating'], .browser-filters *"),
-            Button("Mark", cls="page-btn",
-                   hx_post="/batch_mark", hx_vals={"action": "mark"}, hx_target="body", hx_swap="outerHTML", hx_include=".browser-filters *, .selection-bar *"),
-            Button("Unmark", cls="page-btn",
-                   hx_post="/batch_mark", hx_vals={"action": "unmark"}, hx_target="body", hx_swap="outerHTML", hx_include=".browser-filters *, .selection-bar *"),
-            Button("Clear Selection", cls="page-btn",
-                   hx_post="/clear_selection", hx_target="body", hx_swap="outerHTML", hx_include=".browser-filters *, .selection-bar *"),
-            Button("Open First", cls="page-btn",
-                   hx_post="/open_first_selected", hx_target="body", hx_swap="outerHTML"),
-            cls="sel-actions"
-        ),
-        cls="selection-bar"
-    )
-
-    return Titled(
-        f"{config.title} · Browser",
-        Div(
-            Div(
-                Div(
-                    f"Total: {stats['total']} | Annotated: {stats['annotated']} | Marked: {stats['marked']} | Remaining: {stats['remaining']}",
-                    cls="progress"
-                ),
-                Div(
-                    A("← Back to Annotator", href="/", cls="browse-link"),
-                    cls="progress"
-                ),
-            ),
-            filter_form,
-            selection_bar,
-            grid,
-            cls="browser-container"
-        )
-    )
-
-@rt("/browse_grid")
-def browse_grid(q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1'):
-    """Partial: just the grid, for HTMX updates from the filter controls."""
-    return render_browser_grid(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
-
-@rt("/annotate")
-def annotate_query(image: str = ''):
-    """Jump to annotator using a query parameter to avoid static route collisions."""
-    if image:
-        idx = index_of_image(image)
-        if idx >= 0:
-            state.current_index = idx
-    return index()
-
-@rt("/toggle_select", methods=["POST"])
-def toggle_select(image: str = '', shift: str = '', q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1'):
-    sp = image or ''
-    shift_on = str(shift).lower() in ('1', 'true', 'on')
-    if not sp:
-        return render_browser_grid(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
-
-    if shift_on and state.last_anchor:
-        # Select range between last_anchor and current within filtered, sorted items
-        items = _filtered_items(q=q, rating=rating, show=show, marked=marked, sort=sort)
-        order = [str(p) for (p, _, _) in items]
+@rt("/update_times", methods=["POST"])
+def update_times(start_time: str = "0", end_time: str = "10"):
+    """Update the current clip's start and end times."""
+    current_clip = get_current_clip()
+    if current_clip:
         try:
-            i1 = order.index(state.last_anchor)
-            i2 = order.index(sp)
-            start, end = (i1, i2) if i1 <= i2 else (i2, i1)
-            for s in order[start:end+1]:
-                state.selected.add(s)
+            start = float(start_time)
+            end = float(end_time)
+            if start >= 0 and end > start:
+                clips.update({
+                    'start_timestamp': start,
+                    'end_timestamp': end,
+                    'timestamp': datetime.now().isoformat()
+                }, current_clip.id)
         except ValueError:
-            # If either not in current order, just toggle single
-            if sp in state.selected:
-                state.selected.remove(sp)
-            else:
-                state.selected.add(sp)
-        # Update anchor to current
-        state.last_anchor = sp
-    else:
-        # Toggle single and set anchor
-        if sp in state.selected:
-            state.selected.remove(sp)
-        else:
-            state.selected.add(sp)
-        state.last_anchor = sp
-    return render_browser_grid(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
+            pass
+    return render_main_content()
 
-@rt("/batch_rate", methods=["POST"])
-def batch_rate(set_rating: str = '', q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1'):
-    print(f"DEBUG batch_rate: set_rating='{set_rating}', selected_count={len(state.selected)}")
-    if set_rating and set_rating.isdigit():
-        val = int(set_rating)
-        if 0 <= val < config.num_classes:
-            print(f"DEBUG: Applying rating {val} to {len(state.selected)} images")
-            for spath in list(state.selected):
-                print(f"DEBUG: Processing {spath}")
-                existing = annotations("image_path=?", (spath,), limit=1)
-                if existing:
-                    annotations.update({'rating': val, 'timestamp': datetime.now().isoformat()}, existing[0].id)
-                    print(f"DEBUG: Updated existing annotation for {spath}")
-                else:
-                    annotations.insert({
-                        'image_path': spath,
-                        'rating': val,
-                        'username': get_username(),
-                        'timestamp': datetime.now().isoformat(),
-                        'marked': False
-                    })
-                    print(f"DEBUG: Created new annotation for {spath}")
-        else:
-            print(f"DEBUG: Rating {val} out of range (0-{config.num_classes - 1})")
-    else:
-        print(f"DEBUG: Invalid set_rating value: '{set_rating}'")
-    return browse(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
+@rt("/prev_clip", methods=["POST"])
+def prev_clip():
+    """Navigate to previous clip, or stay at first clip."""
+    if state.current_clip_index > 0:
+        state.current_clip_index -= 1
+    return render_main_content()
 
-@rt("/batch_mark", methods=["POST"])
-def batch_mark(action: str = 'mark', q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1'):
-    flag = True if action == 'mark' else False
-    for spath in list(state.selected):
-        existing = annotations("image_path=?", (spath,), limit=1)
-        if existing:
-            annotations.update({'marked': flag}, existing[0].id)
-        else:
-            annotations.insert({
-                'image_path': spath,
-                'rating': 0,
-                'username': get_username(),
-                'timestamp': datetime.now().isoformat(),
-                'marked': flag
-            })
-    return browse(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
+@rt("/next_clip", methods=["POST"])
+def next_clip():
+    """Navigate to next clip, auto-generating if needed."""
+    audio_clips = get_clips_for_audio(state.current_audio)
 
-@rt("/clear_selection", methods=["POST"])
-def clear_selection(q: str = '', rating: str = '', show: str = 'all', marked: str = '', sort: str = 'name', page: str = '1'):
-    state.selected.clear()
-    return browse(q=q, rating=rating, show=show, marked=marked, sort=sort, page=page)
+    # If we're at the last clip, generate a new one
+    if state.current_clip_index >= len(audio_clips) - 1:
+        last_clip = audio_clips[-1] if audio_clips else None
+        last_end = last_clip.end_timestamp if last_clip else 0
+        auto_generate_clip(state.current_audio, last_end)
 
-@rt("/open_first_selected", methods=["POST"])    
-def open_first_selected():
-    if state.selected:
-        imgs = get_image_files()
-        # Find first selected by list order
-        for i, p in enumerate(imgs):
-            if str(p) in state.selected:
-                state.current_index = i
-                break
-        # Optionally clear selection? keep for now
-    return index()
+    # Move to next clip
+    state.current_clip_index += 1
 
-@rt("/annotate/{image_name:path}", methods=["GET", "POST"])
-def annotate_image(image_name: str):
-    """Jump to annotator at specific image from the browser."""
-    idx = index_of_image(image_name)
-    if idx >= 0:
-        state.current_index = idx
-    return index()
+    return render_main_content()
+
+@rt("/delete_current_clip", methods=["POST"])
+def delete_current_clip():
+    """Delete the current clip."""
+    current_clip = get_current_clip()
+    if current_clip:
+        clips.delete(current_clip.id)
+        # Adjust index if needed
+        audio_clips = get_clips_for_audio(state.current_audio)
+        if state.current_clip_index >= len(audio_clips) and state.current_clip_index > 0:
+            state.current_clip_index -= 1
+    return render_main_content()
 
 @rt("/styles.css")
 def get_styles():
@@ -878,443 +617,58 @@ def get_styles():
         return FileResponse(str(css_path), media_type="text/css")
     return Response("/* Styles not found */", media_type="text/css")
 
-@rt(f"/{config.images_folder}/{{image_name:path}}")
-def get_image(image_name: str):
-    """Serve image files with security checks."""
-    # Allow nested paths with proper validation
+@rt(f"/{config.audio_folder}/{{audio_name:path}}")
+def get_audio(audio_name: str):
+    """Serve audio files with security checks."""
     # Check for path traversal attempts
-    if ".." in image_name or image_name.startswith("/"):
+    if ".." in audio_name or audio_name.startswith("/"):
         return Response("Invalid path", status_code=400)
-    
-    # Validate the file extension
-    if not image_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+
+    # Validate file extension
+    valid_exts = ('.webm', '.mp3', '.wav', '.ogg', '.m4a', '.flac')
+    if not audio_name.lower().endswith(valid_exts):
         return Response("Invalid file type", status_code=400)
-    
-    image_path = Path(config.images_folder) / image_name
-    
-    # Ensure the resolved path is within images directory
+
+    audio_path = Path(config.audio_folder) / audio_name
+
+    # Ensure the resolved path is within audio directory
     try:
-        images_dir = Path(config.images_folder).resolve()
-        resolved_path = image_path.resolve()
-        if not str(resolved_path).startswith(str(images_dir)):
+        audio_dir = Path(config.audio_folder).resolve()
+        resolved_path = audio_path.resolve()
+        if not str(resolved_path).startswith(str(audio_dir)):
             return Response("Access denied", status_code=403)
     except:
         return Response("Invalid path", status_code=400)
-    
-    if image_path.exists():
+
+    if audio_path.exists():
         return FileResponse(
-            str(image_path),
+            str(audio_path),
             headers={"Cache-Control": "public, max-age=3600"}
         )
-    return Response("Image not found", status_code=404)
+    return Response("Audio not found", status_code=404)
 
-@rt("/rate/{rating:int}", methods=["POST"])
-def rate(rating: int):
-    """Save annotation (button click - stay on image)."""
-    # Accept 0..num_classes-1 as valid ratings
-    if rating < 0 or rating >= config.num_classes:
-        return index()
-    
-    current_image = get_current_image()
-    if current_image:
-        # Store in history for undo
-        old_annotation_data = get_annotation_for_image(str(current_image))
-        old_annotation = old_annotation_data['rating']
-        had_annotation = old_annotation_data.get('exists', False)
-        state.history.append({
-            'image_name': str(current_image),
-            'old_rating': old_annotation,
-            'had_annotation': had_annotation,
-            'index': state.current_index,
-            'action': 'rate'
-        })
-        
-        # Keep history limited
-        if len(state.history) > config.max_history:
-            state.history = state.history[-config.max_history:]
-        
-        # Save or update annotation
-        # Use parameterized query to prevent SQL injection
-        existing = annotations("image_path=?", (str(current_image),), limit=1)
-        if existing:
-            # Preserve marked status when updating rating
-            annotations.update({
-                'rating': rating, 
-                'timestamp': datetime.now().isoformat()
-            }, existing[0].id)
-        else:
-            annotations.insert({
-                'image_path': str(current_image),
-                'rating': rating,
-                'username': get_username(),
-                'timestamp': datetime.now().isoformat(),
-                'marked': False
-            })
-        
-        # Stay on current image after rating
-    
-    return index()
-
-@rt("/rate_and_next/{rating:int}", methods=["POST"])
-def rate_and_next(rating: int):
-    """Save annotation and move to next image (keyboard shortcut)."""
-    # Accept 0..num_classes-1 as valid ratings
-    if rating < 0 or rating >= config.num_classes:
-        return index()
-    
-    current_image = get_current_image()
-    if current_image:
-        # Store in history for undo
-        old_annotation_data = get_annotation_for_image(str(current_image))
-        old_annotation = old_annotation_data['rating']
-        had_annotation = old_annotation_data.get('exists', False)
-        state.history.append({
-            'image_name': str(current_image),
-            'old_rating': old_annotation,
-            'had_annotation': had_annotation,
-            'index': state.current_index,
-            'action': 'rate'
-        })
-        
-        # Keep history limited
-        if len(state.history) > config.max_history:
-            state.history = state.history[-config.max_history:]
-        
-        # Save or update annotation
-        existing = annotations("image_path=?", (str(current_image),), limit=1)
-        if existing:
-            # Preserve marked status when updating rating
-            annotations.update({
-                'rating': rating, 
-                'timestamp': datetime.now().isoformat()
-            }, existing[0].id)
-        else:
-            annotations.insert({
-                'image_path': str(current_image),
-                'rating': rating,
-                'username': get_username(),
-                'timestamp': datetime.now().isoformat(),
-                'marked': False
-            })
-        
-        # Move to next image for keyboard shortcuts
-        navigate(1)
-    
-    return index()
-
-@rt("/prev", methods=["POST"])
-def prev():
-    """Navigate to previous image."""
-    navigate(-1)
-    return index()
-
-@rt("/next", methods=["POST"]) 
-def next():
-    """Navigate to next image."""
-    navigate(1)
-    return index()
-
-@rt("/undo", methods=["POST"])
-def undo():
-    """Undo last action (rating or deletion)."""
-    if state.history:
-        last_action = state.history.pop()
-        action_type = last_action.get('action', 'rate')  # Default to 'rate' for backward compatibility
-        
-        if action_type == 'delete':
-            # Restore deleted image file
-            image_name = last_action['image_name']
-            image_data = last_action.get('image_data')
-            old_rating = last_action['old_rating']
-            had_annotation = last_action.get('had_annotation', old_rating is not None)
-            
-            if image_data:
-                # Restore the image file
-                image_path = Path(config.images_folder) / image_name
-                try:
-                    # Create parent directories if needed
-                    image_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(image_path, 'wb') as f:
-                        f.write(image_data)
-                    print(f"Restored image file: {image_path}")
-                    
-                    # Restore annotation if there was one previously (even if rating was 0)
-                    if had_annotation:
-                        annotations.insert({
-                            'image_path': image_name,
-                            'rating': old_rating,
-                            'username': get_username(),
-                            'timestamp': datetime.now().isoformat(),
-                            'marked': False
-                        })
-                    
-                except Exception as e:
-                    print(f"Error restoring image file {image_path}: {e}")
-            
-            # Go back to that image
-            state.current_index = last_action['index']
-            
-        else:
-            # Handle rating undo (existing logic)
-            image_name = last_action['image_name']
-            old_rating = last_action['old_rating']
-            had_annotation = last_action.get('had_annotation', old_rating is not None)
-            
-            if not had_annotation:
-                # If there was no prior annotation, undo should remove the record created by the rating
-                existing = annotations("image_path=?", (image_name,), limit=1)
-                if existing:
-                    annotations.delete(existing[0].id)
-            else:
-                # Restore previous rating (can be 0..N-1)
-                existing = annotations("image_path=?", (image_name,), limit=1)
-                if existing:
-                    annotations.update({'rating': old_rating}, existing[0].id)
-            
-            # Go back to that image
-            state.current_index = last_action['index']
-    
-    return index()
-
-@rt("/mark", methods=["POST"])
-def mark():
-    """Toggle mark status for current image."""
-    current_image = get_current_image()
-    if current_image:
-        # Check if annotation exists
-        existing = annotations("image_path=?", (str(current_image),), limit=1)
-        
-        if existing:
-            # Toggle the marked status
-            current_marked = getattr(existing[0], 'marked', False)
-            annotations.update({'marked': not current_marked}, existing[0].id)
-        else:
-            # Create new annotation with just marked flag
-            annotations.insert({
-                'image_path': str(current_image),
-                'rating': 0,  # No rating yet
-                'username': get_username(),
-                'timestamp': datetime.now().isoformat(),
-                'marked': True
-            })
-    
-    return index()
-
-@rt("/toggle_filter", methods=["POST"])
-def toggle_filter():
-    """Toggle filter for unannotated images."""
-    state.filter_unannotated = not state.filter_unannotated
-    
-    # Clear rating filter when toggling unannotated filter
-    if state.filter_unannotated:
-        state.filter_rating = None
-        images = get_image_files()
-        annotated_images = {a.image_path for a in annotations()}
-        for i, img in enumerate(images):
-            if str(img) not in annotated_images:
-                state.current_index = i
-                break
-    
-    return index()
-
-@rt("/filter_rating", methods=["POST"])
-def filter_rating(rating_filter_select: str = ''):
-    """Filter images by specific rating."""
-    if rating_filter_select == '':
-        state.filter_rating = None
-    else:
-        state.filter_rating = int(rating_filter_select)
-        # Clear unannotated filter when filtering by rating
-        state.filter_unannotated = False
-    
-    # Find first image with the selected rating
-    if state.filter_rating is not None:
-        images = get_image_files()
-        rating_images = {a.image_path for a in annotations() if a.rating == state.filter_rating}
-        for i, img in enumerate(images):
-            if str(img) in rating_images:
-                state.current_index = i
-                break
-    
-    return index()
-
-@rt("/switch_folder", methods=["POST"])
-def switch_folder_endpoint(folder_select: str = ''):
-    """Switch to a different data folder."""
-    if folder_select and folder_select in get_available_folders():
-        folder_path = get_folder_path(folder_select)
-        switch_folder(folder_select)
-        print(f"Switched to folder: {folder_path}")
-    
-    return index()
-
-@rt("/browse_folder", methods=["POST"])
-def browse_folder():
-    """Handle folder selection from directory input."""
-    # Note: This will be triggered when user selects a folder
-    # The browser will send the files in the selected folder
-    # We'll need JavaScript to extract the folder path from the first file
-    print("Folder browse triggered - need to extract folder path from files")
-    return index()
-
-@rt("/delete", methods=["POST"])
-def delete():
-    """Delete current image file and its annotation."""
-    current_image = get_current_image()
-    if current_image:
-        image_path = Path(config.images_folder) / current_image
-        
-        # Store image data and annotation for undo
-        image_data = None
-        old_annotation_data = get_annotation_for_image(str(current_image))
-        old_annotation = old_annotation_data['rating']
-        had_annotation = old_annotation_data.get('exists', False)
-        
-        if image_path.exists():
-            try:
-                # Read image data before deleting
-                with open(image_path, 'rb') as f:
-                    image_data = f.read()
-                
-                image_path.unlink()  # Delete the file
-                print(f"Deleted image file: {image_path}")
-            except Exception as e:
-                print(f"Error deleting image file {image_path}: {e}")
-                return index()  # Return without changes if file deletion fails
-        
-        # Store in history for undo (including image data)
-        state.history.append({
-            'image_name': str(current_image),
-            'old_rating': old_annotation,
-            'index': state.current_index,
-            'action': 'delete',
-            'image_data': image_data,
-            'had_annotation': had_annotation
-        })
-        
-        # Keep history limited
-        if len(state.history) > config.max_history:
-            state.history = state.history[-config.max_history:]
-        
-        # Delete annotation if it exists
-        existing = annotations("image_path=?", (str(current_image),), limit=1)
-        if existing:
-            annotations.delete(existing[0].id)
-        
-        # After deletion, the image list is refreshed and current index automatically
-        # points to what was the next image, so no navigation needed
-    
-    return index()
-
-def navigate(direction):
-    """Navigate through images."""
-    images = get_image_files()
-    
-    if state.filter_unannotated:
-        # Skip annotated images
-        annotated_images = {a.image_path for a in annotations()}
-        new_index = state.current_index
-        
-        # Add safety counter to prevent infinite loops
-        attempts = 0
-        max_attempts = len(images)
-        
-        while attempts < max_attempts:
-            new_index += direction
-            if not (0 <= new_index < len(images)):
-                break
-            if str(images[new_index]) not in annotated_images:
-                state.current_index = new_index
-                break
-            attempts += 1
-    elif state.filter_rating is not None:
-        # Skip images that don't have the selected rating
-        rating_images = {a.image_path for a in annotations() if a.rating == state.filter_rating}
-        new_index = state.current_index
-        
-        # Add safety counter to prevent infinite loops
-        attempts = 0
-        max_attempts = len(images)
-        
-        while attempts < max_attempts:
-            new_index += direction
-            if not (0 <= new_index < len(images)):
-                break
-            if str(images[new_index]) in rating_images:
-                state.current_index = new_index
-                break
-            attempts += 1
-    else:
-        # Normal navigation
-        new_index = state.current_index + direction
-        if 0 <= new_index < len(images):
-            state.current_index = new_index
-
-# Find first unannotated image on startup
-def find_first_unannotated():
-    """Find the index of the first unannotated image."""
-    images = get_image_files()
-    annotated_images = {a.image_path for a in annotations()}
-    for i, img in enumerate(images):
-        if str(img) not in annotated_images:
-            return i
-    return 0
-
-def cleanup_orphaned_entries():
-    """Remove database entries for images that no longer exist."""
-    images = get_image_files()
-    existing_image_paths = {str(img) for img in images}
-    
-    # Get all annotations
-    all_annotations = annotations()
-    orphaned_count = 0
-    
-    for annotation in all_annotations:
-        if annotation.image_path not in existing_image_paths:
-            # Image file no longer exists, delete the annotation
-            annotations.delete(annotation.id)
-            orphaned_count += 1
-            print(f"Removed orphaned entry for: {annotation.image_path}")
-    
-    if orphaned_count > 0:
-        print(f"Cleaned up {orphaned_count} orphaned database entries")
-    else:
-        print("No orphaned database entries found")
-
-# No automatic folder searching - user will select manually if needed
-
-# Initialize database after folder is set
-if hasattr(config, 'images_folder') and config.images_folder:
-    db = database(f'{config.images_folder}/annotations.db')
-    annotations = db.create(Annotation, pk='id')
-
-# Set initial position
-state.current_index = find_first_unannotated()
+# Initialize database
+if hasattr(config, 'audio_folder') and config.audio_folder:
+    db = database(f'{config.audio_folder}/annotations.db')
+    clips = db.create(Clip, pk='id')
 
 # Print startup info
 if __name__ == "__main__":
     print(f"Starting {config.title}")
     print(f"Configuration:")
-    print(f"  - Images folder: {config.images_folder}")
-    print(f"  - Database: {config.images_folder}/annotations.db")
-    print(f"  - Number of classes: {config.num_classes}")
+    print(f"  - Audio folder: {config.audio_folder}")
+    print(f"  - Database: {config.audio_folder}/annotations.db")
     print(f"  - Annotating as: {get_username()}")
-    
-    # Clean up orphaned entries on startup
-    print("Checking for orphaned database entries...")
-    cleanup_orphaned_entries()
-    
-    images = get_image_files()
-    print(f"  - Total images: {len(images)}")
-    
-    stats = get_progress_stats()
-    print(f"  - Already annotated: {stats['annotated']}")
-    print(f"  - Starting at image {state.current_index + 1}: {str(get_current_image()) if get_current_image() else 'None'}")
-    
+
+    audio_files = get_audio_files()
+    print(f"  - Total audio files: {len(audio_files)}")
+
+    if clips:
+        total_clips = len(clips())
+        print(f"  - Total clips: {total_clips}")
+
     try:
         serve(host="localhost", port=5001)
     except KeyboardInterrupt:
         print("\nShutting down...")
-        print("Final cleanup of orphaned database entries...")
-        cleanup_orphaned_entries()
         print("Goodbye!")

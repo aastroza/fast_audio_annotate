@@ -1,8 +1,6 @@
-# Fast Image Annotation
+# Fast Audio Annotate
 
-![Picaflor](fast_annotate.png)
-
-A FastHTML image annotator - Simple, keyboard-driven image annotation tool built with FastHTML.
+A FastHTML audio transcription annotation tool - Streamlined, clip-focused audio annotation with waveform display built with FastHTML and WaveSurfer.js.
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![FastHTML](https://img.shields.io/badge/FastHTML-latest-green)
@@ -10,26 +8,31 @@ A FastHTML image annotator - Simple, keyboard-driven image annotation tool built
 
 ## Features
 
-- **Fast annotation** - Keyboard shortcuts (1-5 keys) for instant rating and auto-advance
-- **Mark problematic images** - Flag images that can't be annotated or have issues (X key)
-- **Smart resume** - Automatically starts from the first unannotated image
-- **Undo support** - Quickly fix mistakes with the U key
-- **Progress tracking** - Visual progress bar with annotation and marking statistics
+- **Clip-focused workflow** - Navigate and edit one clip at a time
+- **Visual waveform display** - Interactive audio waveform with zoom and navigation
+- **Auto-generation** - Automatically creates 10-second clips as you navigate
+- **Precise timestamp editing** - Numeric input fields for exact clip boundaries
+- **Dedicated transcription area** - Large text area for comfortable transcription editing
+- **Visual clip adjustment** - Drag and resize clip boundaries on the waveform
+- **Clip-only playback** - Play button always plays the current clip, not the full audio
+- **Variable speed** - Adjust playback speed (0.5x to 2x)
+- **Mark problematic clips** - Flag clips that have issues
 - **Multi-user support** - Tracks username and timestamp for each annotation
 - **SQLite database** - Persistent storage with efficient queries
-- **Filter mode** - Show only unannotated images
-- **Configurable** - YAML-based configuration for flexibility
+- **Multiple audio formats** - Supports .webm, .mp3, .wav, .ogg, .m4a, .flac
+- **HTMX-powered** - Dynamic updates without full page reloads
 
 ## Quick Start
 
 ```bash
 # Clone and install
-git clone https://github.com/yourusername/fast_image_annotation.git
-cd fast_image_annotation
+git clone https://github.com/yourusername/fast_audio_annotate.git
+cd fast_audio_annotate
 pip install .
 
-# Configure (edit config.yaml)
-# Place images in images/ folder
+# Place audio files in audio/ folder
+mkdir -p audio
+cp your-audio-files.webm audio/
 
 # Run with uv (recommended)
 uv run python main.py
@@ -40,24 +43,81 @@ python main.py
 
 Open browser to `http://localhost:5001`
 
+## How to Annotate
+
+### Basic Workflow
+
+1. **Select Audio**: Choose an audio file from the dropdown
+2. **Navigate Clips**: Use Previous/Next buttons to move between clips
+   - If no clip exists, a new 10-second clip is automatically created
+   - Clips are always sorted by start time
+3. **Adjust Timestamps**:
+   - Type exact values in Start/End input fields
+   - Or drag the clip boundaries on the waveform
+   - Click "Update Times" to apply numeric changes
+4. **Add Transcription**: Type or paste transcription text in the large text area
+5. **Save**: Click "Save Clip" to store your changes
+6. **Repeat**: Click "Next Clip" to move forward (auto-generates new clips as needed)
+
+### Key Features
+
+#### Single-Clip Focus
+The interface always displays exactly one clip at a time, making it easy to focus on transcribing without distraction.
+
+#### Auto-Generation
+When you click "Next Clip" at the end of the audio, the tool automatically creates a new 10-second clip starting from where the last clip ended.
+
+#### Precise Control
+- **Numeric inputs**: Enter exact timestamps (e.g., 12.45 seconds)
+- **Visual adjustment**: Drag clip boundaries on the waveform
+- **Real-time sync**: Changes in inputs update the waveform and vice versa
+
+#### Clip-Only Playback
+The "Play Clip" button only plays the current clip region, not the entire audio file. This lets you quickly review your clip boundaries.
+
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `1-5` | Rate and advance to next |
-| `X` | Mark/unmark current image (problematic/can't annotate) |
-| `Left/Right Arrow` | Navigate images |
-| `U` | Undo last annotation |
+| `Space` | Play/Pause current clip |
+| `←/→` | Skip backward/forward 2 seconds |
+
+## Interface Overview
+
+```
+┌─────────────────────────────────────────┐
+│ Audio File: [Dropdown Selector]         │  ← Select audio file
+├─────────────────────────────────────────┤
+│ Audio 1 of 5 | Clip 3 of 12 | Marked: 1│  ← Progress stats
+├─────────────────────────────────────────┤
+│ [Waveform Display]                      │  ← Visual waveform
+│ [Timeline]                              │
+├─────────────────────────────────────────┤
+│ [▶ Play Clip] [⏸ Pause] [⏹ Stop]       │  ← Playback controls
+├─────────────────────────────────────────┤
+│ Clip 3                                  │
+│ Start: [12.45] End: [22.45] [Update]   │  ← Precise timestamps
+│                                         │
+│ Transcription:                          │
+│ ┌─────────────────────────────────────┐ │
+│ │ [Large text area for transcription] │ │  ← Main editing area
+│ │                                     │ │
+│ └─────────────────────────────────────┘ │
+│ ☐ Mark as problematic                  │
+│ [💾 Save Clip]                          │
+├─────────────────────────────────────────┤
+│ [← Previous] [Delete] [Next Clip →]    │  ← Clip navigation
+└─────────────────────────────────────────┘
+```
 
 ## Configuration
 
 Edit `config.yaml`:
 
 ```yaml
-title: "Image Annotation Tool"
-description: "Rate each image from 1 to 5"
-num_classes: 5  # Number of rating classes
-images_folder: "images"  # Folder containing images to annotate
+title: "Audio Transcription Tool"
+description: "Annotate audio clips with transcriptions"
+audio_folder: "audio"  # Folder containing audio files to annotate
 max_history: 10  # Number of undo operations to keep
 ```
 
@@ -68,29 +128,107 @@ Annotations are stored in SQLite database (`annotations.db`):
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INTEGER | Primary key |
-| image_path | TEXT | Image filename |
-| rating | INTEGER | Rating value (1-num_classes, 0 if not rated) |
+| audio_path | TEXT | Audio filename (relative path) |
+| start_timestamp | FLOAT | Clip start time in seconds |
+| end_timestamp | FLOAT | Clip end time in seconds |
+| text | TEXT | Transcription text for the clip |
 | username | TEXT | System username |
 | timestamp | TEXT | ISO format timestamp |
-| marked | BOOLEAN | Flag for problematic/unannotatable images |
+| marked | BOOLEAN | Flag for problematic clips |
 
 ## Project Structure
 
 ```
-main.py              # FastHTML application (single file)
+main.py              # FastHTML application
 config.yaml          # User configuration
-annotations.db       # SQLite database (created automatically)
-images/              # Image folder
+styles.css           # Custom CSS styles
+audio/               # Audio files folder
+  annotations.db     # SQLite database (created automatically)
 pyproject.toml       # Project metadata and dependencies
 ```
 
-## Development
+## Supported Audio Formats
 
-The app uses FastHTML's single-file pattern for simplicity:
-- Database models and routes in `main.py`
-- SQLite for persistence (no CSV files)
-- HTMX for dynamic updates without full page reloads
-- Clean state management with in-memory tracking
+- WebM (.webm)
+- MP3 (.mp3)
+- WAV (.wav)
+- OGG (.ogg)
+- M4A (.m4a)
+- FLAC (.flac)
+
+## Technology Stack
+
+- **FastHTML** - Python web framework with HTMX integration
+- **WaveSurfer.js v7** - Audio waveform visualization
+- **Regions Plugin** - Interactive region selection and editing
+- **Timeline Plugin** - Time ruler for audio navigation
+- **SQLite** - Lightweight database for annotations
+- **HTMX** - Dynamic HTML updates without JavaScript
+
+## Workflow Tips
+
+### Efficient Transcription
+1. Load audio file and start with clip 1
+2. Play the clip to hear the audio
+3. Adjust start/end times if needed
+4. Type the transcription
+5. Click "Save Clip"
+6. Press "Next Clip" to auto-advance (creates new clip if at the end)
+
+### Handling Long Audio
+The tool automatically segments long audio files into manageable 10-second clips. You can:
+- Adjust clip lengths as needed (shorter for dense dialogue, longer for sparse speech)
+- Delete unnecessary clips (silence, music, etc.)
+- Navigate freely between clips
+
+### Quality Control
+- Use the "Mark as problematic" checkbox for difficult clips
+- Review marked clips later by checking the stats counter
+- Delete and regenerate clips if needed
+
+## Exporting Annotations
+
+You can export annotations directly from the SQLite database:
+
+```python
+import sqlite3
+import json
+
+# Connect to database
+conn = sqlite3.connect('audio/annotations.db')
+conn.row_factory = sqlite3.Row
+cursor = conn.cursor()
+
+# Get all clips
+cursor.execute('SELECT * FROM clip ORDER BY audio_path, start_timestamp')
+clips = [dict(row) for row in cursor.fetchall()]
+
+# Export to JSON
+with open('annotations.json', 'w') as f:
+    json.dump(clips, f, indent=2)
+
+print(f"Exported {len(clips)} clips to annotations.json")
+```
+
+### Export Format
+
+The exported JSON will have this structure:
+
+```json
+[
+  {
+    "id": 1,
+    "audio_path": "interview.webm",
+    "start_timestamp": 0.0,
+    "end_timestamp": 10.0,
+    "text": "Hello, welcome to the interview.",
+    "username": "user",
+    "timestamp": "2025-01-15T10:30:00",
+    "marked": false
+  },
+  ...
+]
+```
 
 ## License
 
@@ -98,4 +236,5 @@ MIT License - see [LICENSE](LICENSE) file.
 
 ## Acknowledgments
 
-Built with [FastHTML](https://github.com/AnswerDotAI/fasthtml) - The fast, Pythonic way to create web applications.
+- Built with [FastHTML](https://github.com/AnswerDotAI/fasthtml) - The fast, Pythonic way to create web applications
+- Audio visualization powered by [WaveSurfer.js](https://wavesurfer.xyz/)
