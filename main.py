@@ -5,32 +5,128 @@ from pathlib import Path
 import os
 from datetime import datetime
 from dataclasses import dataclass
+from typing import Optional
 import simple_parsing as sp
 import json
 
+from db_backend import DatabaseBackend
+
 @dataclass
 class Config:
-    audio_folder: str = sp.field(positional=True, help="The folder containing the audio files and annotations.db")
+    audio_folder: str = sp.field(positional=True, help="The folder containing the audio files and annotations database")
     title: str = "Audio Annotation Tool"
     description: str = "Annotate audio clips with transcriptions"
     max_history: int = 10
+    database_url: Optional[str] = sp.field(
+        default=None,
+        help="Optional database URL (e.g. Neon Postgres). Overrides the default SQLite file.",
+    )
 
 config = sp.parse(Config, config_path="./config.yaml")
 
 # Database setup
-db = None
+database_url = (
+    config.database_url
+    or os.environ.get("DATABASE_URL")
+    or os.environ.get("NEON_DATABASE_URL")
+)
+db_backend = DatabaseBackend(Path(config.audio_folder) / "annotations.db", database_url)
 
-class Clip:
-    id: int
-    audio_path: str
-    start_timestamp: float
-    end_timestamp: float
-    text: str
-    username: str
-    timestamp: str
-    marked: bool = False
 
-clips = None
+def _looks_like_audio_file(name: str) -> bool:
+    audio_extensions = {".webm", ".mp3", ".wav", ".ogg", ".m4a", ".flac"}
+    try:
+        return Path(name).suffix.lower() in audio_extensions
+    except Exception:
+        return False
+
+
+def _extract_audio_path(entry: dict) -> Optional[str]:
+    path_keys = ("audio_path", "path", "file", "filename", "name")
+    for key in path_keys:
+        value = entry.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _normalize_audio_path(audio_path: str, base_dir: Path) -> str:
+    path_obj = Path(audio_path)
+    try:
+        path_obj = path_obj.relative_to(base_dir)
+    except ValueError:
+        pass
+    return path_obj.as_posix()
+
+
+def _parse_metadata_payload(payload, base_dir: Path) -> dict[str, dict]:
+    metadata_map: dict[str, dict] = {}
+
+    def store_entry(audio_path: Optional[str], metadata: object) -> None:
+        if not audio_path:
+            return
+        normalized_path = _normalize_audio_path(audio_path, base_dir)
+        if isinstance(metadata, dict):
+            metadata_map[normalized_path] = dict(metadata)
+        else:
+            metadata_map[normalized_path] = {"value": metadata}
+
+    def handle_dict_entry(entry: dict) -> None:
+        audio_path = _extract_audio_path(entry)
+        if not audio_path:
+            return
+        path_keys = {"audio_path", "path", "file", "filename", "name"}
+        metadata = {k: v for k, v in entry.items() if k not in path_keys}
+        store_entry(audio_path, metadata)
+
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                handle_dict_entry(item)
+        return metadata_map
+
+    if isinstance(payload, dict):
+        list_keys = {"audios", "audio_files", "files"}
+        for key, value in payload.items():
+            if key in list_keys and isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        handle_dict_entry(item)
+                continue
+
+            if isinstance(value, dict) and _extract_audio_path(value):
+                handle_dict_entry(value)
+                continue
+
+            if _looks_like_audio_file(str(key)):
+                store_entry(str(key), value)
+
+    return metadata_map
+
+
+def load_audio_metadata_from_file() -> None:
+    metadata_file = Path(config.audio_folder) / "metadata.json"
+    if not metadata_file.exists():
+        return
+
+    try:
+        with metadata_file.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        print(f"Warning: Failed to load metadata from {metadata_file}: {exc}")
+        return
+
+    metadata_map = _parse_metadata_payload(payload, Path(config.audio_folder))
+
+    if not metadata_map:
+        print(f"Warning: No metadata entries found in {metadata_file}")
+        return
+
+    db_backend.sync_audio_metadata(metadata_map)
+    print(f"Loaded metadata for {len(metadata_map)} audio files from {metadata_file}")
+
+
+load_audio_metadata_from_file()
 
 # Initialize FastHTML app with custom styles and scripts
 app, rt = fast_app(
@@ -70,34 +166,86 @@ def get_audio_files():
     # Return sorted list of relative paths
     return sorted([audio.relative_to(audio_dir) for audio in audio_files_set])
 
+
+def get_audio_metadata(audio_path: Optional[str]) -> Optional[dict]:
+    """Fetch metadata for an audio file from the database."""
+
+    if not audio_path:
+        return None
+
+    record = db_backend.fetch_audio_metadata(str(audio_path))
+    return record.metadata if record else None
+
+
+def render_audio_metadata_panel(metadata: Optional[dict]):
+    """Render a panel summarizing audio metadata."""
+
+    if not metadata:
+        body = Div(
+            "No metadata available for this audio file.",
+            style="color: #666; font-style: italic;",
+        )
+    else:
+        entries = []
+        for key, value in sorted(metadata.items(), key=lambda item: str(item[0])):
+            if isinstance(value, (dict, list)):
+                formatted_value = json.dumps(value, ensure_ascii=False, indent=2)
+                value_node = Pre(
+                    formatted_value,
+                    style=(
+                        "margin: 0; white-space: pre-wrap; background: #f1f3f5; padding: 8px; "
+                        "border-radius: 4px; flex: 1; font-family: 'Fira Code', monospace; font-size: 13px;"
+                    ),
+                )
+            else:
+                value_node = Span(str(value))
+
+            entries.append(
+                Div(
+                    Span(f"{key}:", style="font-weight: 600; min-width: 120px;"),
+                    value_node,
+                    style="display: flex; gap: 8px; align-items: flex-start;",
+                )
+            )
+
+        body = Div(
+            *entries,
+            style="display: flex; flex-direction: column; gap: 6px;"
+        )
+
+    return Div(
+        H4("Audio Metadata", style="margin-bottom: 10px; color: #343a40;"),
+        body,
+        cls="audio-metadata-panel",
+        style=(
+            "margin-bottom: 20px; padding: 15px; background: #ffffff; border: 1px solid #dee2e6; "
+            "border-radius: 8px;"
+        ),
+    )
+
+
 def get_username():
     """Get current username."""
     return os.environ.get('USER') or os.environ.get('USERNAME') or 'unknown'
 
 def get_clips_for_audio(audio_path):
     """Get all clips for a specific audio file, sorted by start time."""
-    if not audio_path:
-        return []
-    return sorted(
-        clips("audio_path=?", (str(audio_path),)),
-        key=lambda c: c.start_timestamp
-    )
+    return db_backend.fetch_clips(str(audio_path) if audio_path else None)
 
 def auto_generate_clip(audio_path, last_end_time=0):
     """Auto-generate a 10-second clip starting from last_end_time."""
     start = last_end_time
     end = start + 10.0
 
-    new_clip = clips.insert({
+    return db_backend.create_clip({
         'audio_path': str(audio_path),
         'start_timestamp': start,
         'end_timestamp': end,
         'text': '',
         'username': get_username(),
         'timestamp': datetime.now().isoformat(),
-        'marked': False
+        'marked': False,
     })
-    return new_clip
 
 def get_current_clip():
     """Get the current clip being edited, auto-generating if needed."""
@@ -159,6 +307,7 @@ def render_main_content():
     audio_files = get_audio_files()
     current_clip = get_current_clip()
     stats = get_progress_stats()
+    metadata = get_audio_metadata(state.current_audio)
 
     return Div(
         # Audio file selector
@@ -189,7 +338,9 @@ def render_main_content():
 
         # Current audio filename and playback info
         Div(f"File: {state.current_audio}", cls="progress", style="font-weight: 500; margin-bottom: 10px;"),
-        
+
+        render_audio_metadata_panel(metadata),
+
         # Current time display and hotkeys info
         Div(
             Div(
@@ -628,11 +779,14 @@ def save_current_clip(transcription: str = "", marked: str = ""):
     """Save the current clip's transcription and marked status."""
     current_clip = get_current_clip()
     if current_clip:
-        clips.update({
-            'text': transcription,
-            'marked': marked == "on",
-            'timestamp': datetime.now().isoformat()
-        }, current_clip.id)
+        db_backend.update_clip(
+            current_clip.id,
+            {
+                'text': transcription,
+                'marked': marked == "on",
+                'timestamp': datetime.now().isoformat(),
+            },
+        )
     return render_main_content()
 
 @rt("/update_times", methods=["POST"])
@@ -644,11 +798,14 @@ def update_times(start_time: str = "0", end_time: str = "10"):
             start = float(start_time)
             end = float(end_time)
             if start >= 0 and end > start:
-                clips.update({
-                    'start_timestamp': start,
-                    'end_timestamp': end,
-                    'timestamp': datetime.now().isoformat()
-                }, current_clip.id)
+                db_backend.update_clip(
+                    current_clip.id,
+                    {
+                        'start_timestamp': start,
+                        'end_timestamp': end,
+                        'timestamp': datetime.now().isoformat(),
+                    },
+                )
         except ValueError:
             pass
     return render_main_content()
@@ -661,10 +818,13 @@ def set_start_time(time: str = "0"):
         try:
             start_time = float(time)
             if start_time >= 0 and start_time < current_clip.end_timestamp:
-                clips.update({
-                    'start_timestamp': start_time,
-                    'timestamp': datetime.now().isoformat()
-                }, current_clip.id)
+                db_backend.update_clip(
+                    current_clip.id,
+                    {
+                        'start_timestamp': start_time,
+                        'timestamp': datetime.now().isoformat(),
+                    },
+                )
         except ValueError:
             pass
     return render_main_content()
@@ -677,10 +837,13 @@ def set_end_time(time: str = "10"):
         try:
             end_time = float(time)
             if end_time > current_clip.start_timestamp:
-                clips.update({
-                    'end_timestamp': end_time,
-                    'timestamp': datetime.now().isoformat()
-                }, current_clip.id)
+                db_backend.update_clip(
+                    current_clip.id,
+                    {
+                        'end_timestamp': end_time,
+                        'timestamp': datetime.now().isoformat(),
+                    },
+                )
         except ValueError:
             pass
     return render_main_content()
@@ -713,7 +876,7 @@ def delete_current_clip():
     """Delete the current clip."""
     current_clip = get_current_clip()
     if current_clip:
-        clips.delete(current_clip.id)
+        db_backend.delete_clip(current_clip.id)
         # Adjust index if needed
         audio_clips = get_clips_for_audio(state.current_audio)
         if state.current_clip_index >= len(audio_clips) and state.current_clip_index > 0:
@@ -758,25 +921,19 @@ def get_audio(audio_name: str):
         )
     return Response("Audio not found", status_code=404)
 
-# Initialize database
-if hasattr(config, 'audio_folder') and config.audio_folder:
-    db = database(f'{config.audio_folder}/annotations.db')
-    clips = db.create(Clip, pk='id')
-
 # Print startup info
 if __name__ == "__main__":
     print(f"Starting {config.title}")
     print(f"Configuration:")
     print(f"  - Audio folder: {config.audio_folder}")
-    print(f"  - Database: {config.audio_folder}/annotations.db")
+    print(f"  - Database: {db_backend.backend_label()}")
     print(f"  - Annotating as: {get_username()}")
 
     audio_files = get_audio_files()
     print(f"  - Total audio files: {len(audio_files)}")
 
-    if clips:
-        total_clips = len(clips())
-        print(f"  - Total clips: {total_clips}")
+    total_clips = db_backend.count_clips()
+    print(f"  - Total clips: {total_clips}")
 
     try:
         serve(host="localhost", port=5001)
