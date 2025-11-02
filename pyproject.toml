@@ -10,4 +10,16 @@ dependencies = [
     "simple-parsing>=0.1.7",
     "starlette>=0.37.0",
     "psycopg[binary]>=3.1",
+    "numpy>=1.26.4",
+    "torch>=2.5.1",
+    "transformers>=4.47.1",
+    "huggingface_hub>=0.27.0",
+    "librosa>=0.10.2",
+    "soundfile>=0.12.1",
+    "pyloudnorm>=0.1.1",
+    "webrtcvad>=2.0.10",
+    "resampy>=0.4.3",
 ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}

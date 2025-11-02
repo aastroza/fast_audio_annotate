@@ -121,11 +121,27 @@ description: "Annotate audio clips with transcriptions"
 audio_folder: "audio"  # Folder containing audio files to annotate
 max_history: 10  # Number of undo operations to keep
 database_url: null  # Optional Postgres/Neon connection string
+metadata_filename: "metadata.json"  # Metadata file to ingest on startup
+whisper_model: "openai/whisper-large-v3"  # Default Whisper model for preprocessing
+transcription_language: null  # Force a transcription language or leave null for auto-detect
 ```
 
 If `database_url` is omitted (or set to `null`), the app stores annotations in
 `audio/annotations.db` using SQLite. Provide a Postgres connection string to use
 an external database instead.
+
+### Preprocessing audios with Whisper
+
+Use the `scripts/preprocess_audio.py` helper to generate automatic transcripts for
+every audio file in the configured folder. The script uses the same Whisper model
+and language settings defined in `config.yaml` but can be overridden via CLI flags.
+
+```bash
+uv run python scripts/preprocess_audio.py --word-timestamps
+```
+
+By default, transcripts are written to `<audio_folder>/transcriptions`. Pass
+`--output` to save them elsewhere, or `--no-vad` to disable the VAD-based chunking.
 
 ## Using Neon (Optional)
 

@@ -2,27 +2,24 @@
 from fasthtml.common import *
 from starlette.responses import FileResponse, Response
 from pathlib import Path
-import os
-from datetime import datetime
-from dataclasses import dataclass
 from typing import Optional
-import simple_parsing as sp
+import os
+import sys
 import json
+from datetime import datetime
+
+
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from fast_audio_annotate.config import AppConfig, parse_app_config
+from fast_audio_annotate.metadata import iter_audio_files, load_audio_metadata_from_file
 
 from db_backend import DatabaseBackend
 
-@dataclass
-class Config:
-    audio_folder: str = sp.field(positional=True, help="The folder containing the audio files and annotations database")
-    title: str = "Audio Annotation Tool"
-    description: str = "Annotate audio clips with transcriptions"
-    max_history: int = 10
-    database_url: Optional[str] = sp.field(
-        default=None,
-        help="Optional database URL (e.g. Neon Postgres). Overrides the default SQLite file.",
-    )
-
-config = sp.parse(Config, config_path="./config.yaml")
+config: AppConfig = parse_app_config()
 
 # Database setup
 database_url = (
@@ -30,103 +27,10 @@ database_url = (
     or os.environ.get("DATABASE_URL")
     or os.environ.get("NEON_DATABASE_URL")
 )
-db_backend = DatabaseBackend(Path(config.audio_folder) / "annotations.db", database_url)
+db_backend = DatabaseBackend(config.audio_path / "annotations.db", database_url)
 
 
-def _looks_like_audio_file(name: str) -> bool:
-    audio_extensions = {".webm", ".mp3", ".wav", ".ogg", ".m4a", ".flac"}
-    try:
-        return Path(name).suffix.lower() in audio_extensions
-    except Exception:
-        return False
-
-
-def _extract_audio_path(entry: dict) -> Optional[str]:
-    path_keys = ("audio_path", "path", "file", "filename", "name")
-    for key in path_keys:
-        value = entry.get(key)
-        if value:
-            return str(value)
-    return None
-
-
-def _normalize_audio_path(audio_path: str, base_dir: Path) -> str:
-    path_obj = Path(audio_path)
-    try:
-        path_obj = path_obj.relative_to(base_dir)
-    except ValueError:
-        pass
-    return path_obj.as_posix()
-
-
-def _parse_metadata_payload(payload, base_dir: Path) -> dict[str, dict]:
-    metadata_map: dict[str, dict] = {}
-
-    def store_entry(audio_path: Optional[str], metadata: object) -> None:
-        if not audio_path:
-            return
-        normalized_path = _normalize_audio_path(audio_path, base_dir)
-        if isinstance(metadata, dict):
-            metadata_map[normalized_path] = dict(metadata)
-        else:
-            metadata_map[normalized_path] = {"value": metadata}
-
-    def handle_dict_entry(entry: dict) -> None:
-        audio_path = _extract_audio_path(entry)
-        if not audio_path:
-            return
-        path_keys = {"audio_path", "path", "file", "filename", "name"}
-        metadata = {k: v for k, v in entry.items() if k not in path_keys}
-        store_entry(audio_path, metadata)
-
-    if isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict):
-                handle_dict_entry(item)
-        return metadata_map
-
-    if isinstance(payload, dict):
-        list_keys = {"audios", "audio_files", "files"}
-        for key, value in payload.items():
-            if key in list_keys and isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        handle_dict_entry(item)
-                continue
-
-            if isinstance(value, dict) and _extract_audio_path(value):
-                handle_dict_entry(value)
-                continue
-
-            if _looks_like_audio_file(str(key)):
-                store_entry(str(key), value)
-
-    return metadata_map
-
-
-def load_audio_metadata_from_file() -> None:
-    metadata_file = Path(config.audio_folder) / "metadata.json"
-    if not metadata_file.exists():
-        return
-
-    try:
-        with metadata_file.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except Exception as exc:
-        print(f"Warning: Failed to load metadata from {metadata_file}: {exc}")
-        return
-
-    metadata_map = _parse_metadata_payload(payload, Path(config.audio_folder))
-
-    if not metadata_map:
-        print(f"Warning: No metadata entries found in {metadata_file}")
-        return
-
-    db_backend.sync_audio_metadata(metadata_map)
-    print(f"Loaded metadata for {len(metadata_map)} audio files from {metadata_file}")
-
-
-load_audio_metadata_from_file()
+load_audio_metadata_from_file(config.audio_path, db_backend, config.metadata_filename)
 
 # Initialize FastHTML app with custom styles and scripts
 app, rt = fast_app(
@@ -154,17 +58,9 @@ state = AppState()
 # Helper functions
 def get_audio_files():
     """Get all audio files from the configured directory (deduplicated)."""
-    audio_dir = Path(config.audio_folder)
-    audio_files_set = set()
-    if audio_dir.exists():
-        for ext in ['.webm', '.mp3', '.wav', '.ogg', '.m4a', '.flac']:
-            # Search case-insensitively but only add each file once
-            for audio_file in audio_dir.rglob(f"*{ext}"):
-                audio_files_set.add(audio_file)
-            for audio_file in audio_dir.rglob(f"*{ext.upper()}"):
-                audio_files_set.add(audio_file)
-    # Return sorted list of relative paths
-    return sorted([audio.relative_to(audio_dir) for audio in audio_files_set])
+    audio_dir = config.audio_path
+    files = [path.relative_to(audio_dir) for path in iter_audio_files(audio_dir)]
+    return sorted(dict.fromkeys(files))
 
 
 def get_audio_metadata(audio_path: Optional[str]) -> Optional[dict]:
