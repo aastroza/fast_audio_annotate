@@ -21,6 +21,7 @@ A FastHTML audio transcription annotation tool - Streamlined, clip-focused audio
 - **SQLite database** - Persistent storage with efficient queries
 - **Multiple audio formats** - Supports .webm, .mp3, .wav, .ogg, .m4a, .flac
 - **HTMX-powered** - Dynamic updates without full page reloads
+- **Audio metadata sync** - Optionally ingest per-audio metadata from `metadata.json`
 
 ## Quick Start
 
@@ -119,7 +120,30 @@ title: "Audio Transcription Tool"
 description: "Annotate audio clips with transcriptions"
 audio_folder: "audio"  # Folder containing audio files to annotate
 max_history: 10  # Number of undo operations to keep
+database_url: null  # Optional Postgres/Neon connection string
 ```
+
+If `database_url` is omitted (or set to `null`), the app stores annotations in
+`audio/annotations.db` using SQLite. Provide a Postgres connection string to use
+an external database instead.
+
+## Using Neon (Optional)
+
+You can host the annotation database on [Neon](https://neon.com/) by supplying
+the Neon connection string. Either set the value in `config.yaml` or export one
+of the following environment variables before running the app:
+
+```bash
+export NEON_DATABASE_URL="postgresql://user:password@host/db?sslmode=require"
+# or
+export DATABASE_URL="postgresql://user:password@host/db?sslmode=require"
+```
+
+The application will automatically detect the Postgres URL and manage the
+`clips` table on startup. Neon requires SSL connections, which are supported by
+the bundled `psycopg` driver. Refer to the [Neon Python guide](https://neon.com/docs/guides/python)
+for detailed instructions on creating a project and retrieving your connection
+string.
 
 ## Database Schema
 
@@ -135,6 +159,63 @@ Annotations are stored in SQLite database (`annotations.db`):
 | username | TEXT | System username |
 | timestamp | TEXT | ISO format timestamp |
 | marked | BOOLEAN | Flag for problematic clips |
+
+### Audio Metadata Table
+
+When a `metadata.json` file is present, the app stores its contents in the
+`audio_metadata` table:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| audio_path | TEXT | Audio filename (relative path, matches `clips.audio_path`) |
+| metadata_json | JSON / TEXT | Serialized metadata payload |
+
+This table lets you join metadata with clip annotations using the shared
+`audio_path` value.
+
+## Audio Metadata File (Optional)
+
+To associate metadata with audio files, place a `metadata.json` file inside the
+audio directory specified in `config.yaml` (default: `audio/`). Each entry should
+map to an audio filename (relative to the audio directory). Examples of accepted
+structures:
+
+```json
+{
+  "session_01.webm": {
+    "speaker": "Alice",
+    "language": "es-MX",
+    "notes": "First interview"
+  },
+  "nested/session_02.wav": {
+    "speaker": "Bob",
+    "topic": "Customer feedback"
+  }
+}
+```
+
+or
+
+```json
+{
+  "audios": [
+    {
+      "audio_path": "session_03.webm",
+      "speaker": "Clara",
+      "duration": 612.4
+    },
+    {
+      "file": "nested/session_04.wav",
+      "language": "es-AR",
+      "tags": ["support", "priority"]
+    }
+  ]
+}
+```
+
+The application automatically loads this file on startup and upserts the records
+into the `audio_metadata` table. Metadata is displayed alongside the waveform and
+is available for downstream exports or integrations.
 
 ## Project Structure
 
