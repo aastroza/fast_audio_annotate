@@ -214,6 +214,7 @@ Annotations are stored in SQLite database (`annotations.db`):
 | username | TEXT | System username |
 | timestamp | TEXT | ISO format timestamp |
 | marked | BOOLEAN | Flag for problematic clips |
+| human_reviewed | BOOLEAN | Flag indicating the transcript was manually reviewed |
 
 ### Audio Metadata Table
 

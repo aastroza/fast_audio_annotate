@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preprocess audio files with Whisper and persist segment-level transcripts."""
+"""Transcribe audio with OpenAI Whisper and store segment-level results."""
 from __future__ import annotations
 
 import argparse
@@ -8,75 +8,127 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT_DIR / "src"
-if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-# Add the root directory to sys.path to import db_backend
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from fast_audio_annotate.config import AppConfig, parse_app_config
-from fast_audio_annotate.metadata import iter_audio_files
-from fast_audio_annotate.modal_transcription import ModalWhisperTranscriber
-from fast_audio_annotate.transcription import WhisperTranscriber
-from db_backend import DatabaseBackend
+AUDIO_EXTENSIONS = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".oga",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+
+from db_backend import DatabaseBackend  # noqa: E402  pylint: disable=wrong-import-position
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="./config.yaml", help="Path to the YAML configuration file.")
-    parser.add_argument("--audio-folder", dest="audio_folder", help="Override the audio folder defined in the config.")
-    parser.add_argument("--output", dest="output_dir", help="Directory where JSON transcripts will be written.")
-    parser.add_argument("--model", dest="model_name", help="Whisper model name to use.")
-    parser.add_argument("--language", dest="language", help="Force a transcription language (e.g. 'es').")
-    parser.add_argument("--batch-size", type=int, default=8, help="Maximum batch size for Whisper inference.")
-    parser.add_argument("--word-timestamps", action="store_true", help="Include word-level timestamps in the output.")
     parser.add_argument(
-        "--no-vad",
-        action="store_true",
-        help="Disable VAD-based chunking and transcribe each file as a single block.",
+        "--audio-folder",
+        dest="audio_folder",
+        help="Path to the directory containing audio files (defaults to config.yaml or ./audio).",
     )
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing transcript files instead of skipping them.",
+        "--config",
+        default="config.yaml",
+        help="Optional YAML configuration file with defaults.",
     )
     parser.add_argument(
         "--database-url",
         dest="database_url",
-        help="Override the database URL defined in the config or environment.",
+        help="Postgres/Neon connection string (overrides config/env).",
     )
     parser.add_argument(
-        "--no-modal",
-        dest="use_modal",
-        action="store_false",
-        help="Run Whisper locally instead of delegating to Modal.",
+        "--model",
+        dest="model_name",
+        help="OpenAI Whisper model to use (defaults to config or whisper-1).",
     )
     parser.add_argument(
-        "--modal",
-        dest="use_modal",
+        "--language",
+        dest="language",
+        help="Language hint for transcription (e.g. es, en).",
+    )
+    parser.add_argument(
+        "--output",
+        dest="output_dir",
+        help="Directory where verbose JSON transcripts will be written.",
+    )
+    parser.add_argument(
+        "--overwrite",
         action="store_true",
-        help="Force Whisper inference to run on Modal (default).",
+        help="Recreate clips even if they already exist in the database.",
     )
-    parser.set_defaults(use_modal=True)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run without modifying the database (still writes JSON if enabled).",
+    )
     return parser.parse_args()
 
 
-def resolve_audio_directory(args: argparse.Namespace, config: AppConfig) -> Path:
-    if args.audio_folder:
-        return Path(args.audio_folder)
-    return config.audio_path
+def load_simple_yaml(path: str) -> Dict[str, Any]:
+    """Read a tiny subset of YAML consisting of key: value pairs.
+
+    The project config file uses a very small subset of YAML, so we can parse it
+    without adding PyYAML as a dependency. Only the keys required by this script
+    are returned.
+    """
+
+    config_path = Path(path)
+    if not config_path.exists():
+        return {}
+
+    data: Dict[str, Any] = {}
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if value.lower() in {"null", "none", ""}:
+            data[key] = None
+        else:
+            data[key] = value
+    return data
 
 
-def resolve_database_url(args: argparse.Namespace, config: AppConfig) -> Optional[str]:
-    if args.database_url:
-        return args.database_url
+def resolve_audio_directory(args: argparse.Namespace, config: Dict[str, Any]) -> Path:
+    candidate = args.audio_folder or config.get("audio_folder") or "audio"
+    audio_dir = Path(candidate)
+    if not audio_dir.is_absolute():
+        audio_dir = (ROOT_DIR / audio_dir).resolve()
+    return audio_dir
+
+
+def resolve_model_name(args: argparse.Namespace, config: Dict[str, Any]) -> str:
+    return args.model_name or config.get("whisper_model") or "whisper-1"
+
+
+def resolve_language(args: argparse.Namespace, config: Dict[str, Any]) -> Optional[str]:
+    language = args.language or config.get("transcription_language")
+    if isinstance(language, str) and language.lower() == "auto":
+        return None
+    return language
+
+
+def resolve_database_url(args: argparse.Namespace, config: Dict[str, Any]) -> Optional[str]:
     return (
-        config.database_url
+        args.database_url
+        or config.get("database_url")
         or os.environ.get("DATABASE_URL")
         or os.environ.get("NEON_DATABASE_URL")
     )
@@ -84,18 +136,118 @@ def resolve_database_url(args: argparse.Namespace, config: AppConfig) -> Optiona
 
 def resolve_output_directory(args: argparse.Namespace, audio_dir: Path) -> Path:
     if args.output_dir:
-        return Path(args.output_dir)
+        output_dir = Path(args.output_dir)
+        if not output_dir.is_absolute():
+            return (ROOT_DIR / output_dir).resolve()
+        return output_dir
     return audio_dir / "transcriptions"
 
 
-def resolve_model_name(args: argparse.Namespace, config: AppConfig) -> str:
-    return args.model_name or config.whisper_model
+def iter_audio_files(audio_dir: Path) -> Iterator[Path]:
+    for path in sorted(audio_dir.rglob("*")):
+        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+            yield path
 
 
-def resolve_language(args: argparse.Namespace, config: AppConfig) -> Optional[str]:
-    if args.language:
-        return None if args.language.lower() == "auto" else args.language
-    return config.transcription_language
+def create_openai_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is required to use Whisper API.")
+    return OpenAI(api_key=api_key)
+
+
+def coerce_segment_value(segment: Any, key: str, default: Any) -> Any:
+    if isinstance(segment, dict):
+        return segment.get(key, default)
+    return getattr(segment, key, default)
+
+
+def normalize_segments(transcription: Any) -> List[Dict[str, Any]]:
+    raw_segments: Optional[Iterable[Any]] = None
+    if isinstance(transcription, dict):
+        raw_segments = transcription.get("segments")
+    else:
+        raw_segments = getattr(transcription, "segments", None)
+
+    segments: List[Dict[str, Any]] = []
+    if raw_segments:
+        for index, segment in enumerate(raw_segments):
+            start = coerce_segment_value(segment, "start", None)
+            end = coerce_segment_value(segment, "end", None)
+            text = coerce_segment_value(segment, "text", "")
+            if start is None or end is None:
+                continue
+            segments.append(
+                {
+                    "id": coerce_segment_value(segment, "id", index),
+                    "start": float(start),
+                    "end": float(end),
+                    "text": str(text).strip(),
+                }
+            )
+
+    text_value = (
+        transcription.get("text")
+        if isinstance(transcription, dict)
+        else getattr(transcription, "text", "")
+    )
+
+    if not segments and text_value:
+        segments.append({"id": 0, "start": 0.0, "end": 0.0, "text": str(text_value).strip()})
+
+    return segments
+
+
+def transcription_to_payload(
+    transcription: Any,
+    relative_audio_path: str,
+    model_name: str,
+    language_hint: Optional[str],
+) -> Dict[str, Any]:
+    segments = normalize_segments(transcription)
+    language_value = (
+        transcription.get("language")
+        if isinstance(transcription, dict)
+        else getattr(transcription, "language", None)
+    )
+    text_value = (
+        transcription.get("text")
+        if isinstance(transcription, dict)
+        else getattr(transcription, "text", "")
+    )
+
+    return {
+        "model": model_name,
+        "language": language_value or language_hint,
+        "relative_audio_path": relative_audio_path,
+        "text": text_value,
+        "duration": max((segment["end"] for segment in segments), default=0.0),
+        "segments": segments,
+    }
+
+
+def write_transcript_json(output_path: Path, payload: Dict[str, Any]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def transcribe_audio(
+    client: OpenAI,
+    audio_path: Path,
+    model_name: str,
+    language: Optional[str],
+) -> Any:
+    kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "response_format": "verbose_json",
+        "timestamp_granularities": ["segment"],
+    }
+    if language:
+        kwargs["language"] = language
+
+    with audio_path.open("rb") as audio_file:
+        return client.audio.transcriptions.create(file=audio_file, **kwargs)
 
 
 def get_username() -> str:
@@ -104,32 +256,22 @@ def get_username() -> str:
 
 def main() -> None:
     args = parse_args()
-    config = parse_app_config(args.config)
+    config_data = load_simple_yaml(args.config)
 
-    audio_dir = resolve_audio_directory(args, config)
+    audio_dir = resolve_audio_directory(args, config_data)
     output_dir = resolve_output_directory(args, audio_dir)
-    model_name = resolve_model_name(args, config)
-    language = resolve_language(args, config)
-    chunking_strategy = "none" if args.no_vad else "auto"
-    database_url = resolve_database_url(args, config)
+    model_name = resolve_model_name(args, config_data)
+    language = resolve_language(args, config_data)
+    database_url = resolve_database_url(args, config_data)
 
     audio_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-
-    transcriber: Union[WhisperTranscriber, ModalWhisperTranscriber]
-    transcriber = ModalWhisperTranscriber(
-        model_name,
-        language=language,
-        return_word_timestamps=args.word_timestamps,
-        chunking_strategy=chunking_strategy,
-        batch_size=args.batch_size,
-    )
-
+    client = create_openai_client()
     db_backend = DatabaseBackend(audio_dir / "annotations.db", database_url)
     print(f"Using database backend: {db_backend.backend_label()}")
-    username = get_username()
 
+    username = get_username()
     audio_files = list(iter_audio_files(audio_dir))
     if not audio_files:
         print(f"No audio files found in {audio_dir}")
@@ -139,64 +281,55 @@ def main() -> None:
         relative_path = audio_path.relative_to(audio_dir)
         relative_audio_path = relative_path.as_posix()
         output_path = output_dir / relative_path.with_suffix(".json")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         existing_clip_count = db_backend.count_clips(relative_audio_path)
-        transcript_exists = output_path.exists()
-
-        if (transcript_exists or existing_clip_count) and not args.overwrite:
-            reason_bits = []
-            if transcript_exists:
-                reason_bits.append("transcript already exists")
-            if existing_clip_count:
-                reason_bits.append(f"{existing_clip_count} clips already in database")
-            reason = " and ".join(reason_bits)
-            print(f"Skipping {relative_path} ({reason})")
+        if existing_clip_count and not args.overwrite:
+            print(
+                f"Skipping {relative_audio_path} ({existing_clip_count} clips already stored)"
+            )
             continue
 
-        if existing_clip_count and args.overwrite:
-            print(
-                f"Clearing {existing_clip_count} existing clips for {relative_path} from database..."
-            )
+        if existing_clip_count and args.overwrite and not args.dry_run:
+            print(f"Clearing {existing_clip_count} existing clips for {relative_audio_path}...")
             db_backend.delete_clips_for_audio(relative_audio_path)
 
-        print(f"Transcribing {relative_path} with {model_name}...")
-        result = transcriber.transcribe_file(audio_path)
+        print(f"Transcribing {relative_audio_path} with {model_name} via OpenAI Whisper...")
+        try:
+            transcription = transcribe_audio(client, audio_path, model_name, language)
+        except Exception as exc:  # pragma: no cover - network errors
+            print(f"Failed to transcribe {relative_audio_path}: {exc}")
+            continue
 
-        data = result.to_dict()
-        data.update(
-            {
-                "relative_audio_path": relative_audio_path,
-                "model": model_name,
-                "language": result.language or language,
-                "duration": max((segment.end for segment in result.segments), default=0.0),
-            }
+        payload = transcription_to_payload(
+            transcription,
+            relative_audio_path,
+            model_name,
+            language,
         )
-
-        with output_path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-
+        write_transcript_json(output_path, payload)
         print(f"Saved transcript to {output_path}")
+
+        if args.dry_run:
+            continue
 
         timestamp = datetime.now().isoformat()
         inserted = 0
-
-        for segment in result.segments:
+        for segment in payload["segments"]:
             clip_values = {
                 "audio_path": relative_audio_path,
-                "start_timestamp": float(segment.start),
-                "end_timestamp": float(segment.end),
-                "text": segment.text,
+                "start_timestamp": segment["start"],
+                "end_timestamp": segment["end"],
+                "text": segment["text"],
                 "username": username,
                 "timestamp": timestamp,
                 "marked": False,
+                "human_reviewed": False,
             }
-
             db_backend.create_clip(clip_values)
             inserted += 1
 
         print(
-            f"Stored {inserted} clip{'s' if inserted != 1 else ''} for {relative_path} in database"
+            f"Stored {inserted} clip{'s' if inserted != 1 else ''} for {relative_audio_path} in database"
         )
 
 

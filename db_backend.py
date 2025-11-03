@@ -25,6 +25,7 @@ class ClipRecord:
     username: str
     timestamp: str
     marked: bool
+    human_reviewed: bool
 
 
 @dataclass
@@ -76,7 +77,7 @@ class DatabaseBackend:
                 cursor = conn.execute(
                     """
                     SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked
+                           username, timestamp, marked, human_reviewed
                     FROM clips
                     WHERE audio_path = ?
                     ORDER BY start_timestamp
@@ -89,7 +90,7 @@ class DatabaseBackend:
                 cur.execute(
                     """
                     SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked
+                           username, timestamp, marked, human_reviewed
                     FROM clips
                     WHERE audio_path = %s
                     ORDER BY start_timestamp
@@ -108,7 +109,7 @@ class DatabaseBackend:
                 cursor = conn.execute(
                     """
                     SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked
+                           username, timestamp, marked, human_reviewed
                     FROM clips
                     ORDER BY id
                     """
@@ -119,7 +120,7 @@ class DatabaseBackend:
                 cur.execute(
                     """
                     SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked
+                           username, timestamp, marked, human_reviewed
                     FROM clips
                     ORDER BY id
                     """
@@ -158,7 +159,7 @@ class DatabaseBackend:
                 cursor = conn.execute(
                     """
                     SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked
+                           username, timestamp, marked, human_reviewed
                     FROM clips
                     WHERE id = ?
                     """,
@@ -170,7 +171,7 @@ class DatabaseBackend:
                 cur.execute(
                     """
                     SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked
+                           username, timestamp, marked, human_reviewed
                     FROM clips
                     WHERE id = %s
                     """,
@@ -192,6 +193,7 @@ class DatabaseBackend:
             values["username"],
             values["timestamp"],
             bool(values.get("marked", False)),
+            bool(values.get("human_reviewed", False)),
         )
 
         if self.backend == "sqlite":
@@ -200,9 +202,9 @@ class DatabaseBackend:
                     """
                     INSERT INTO clips (
                         audio_path, start_timestamp, end_timestamp, text,
-                        username, timestamp, marked
+                        username, timestamp, marked, human_reviewed
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     params,
                 )
@@ -214,9 +216,9 @@ class DatabaseBackend:
                 """
                 INSERT INTO clips (
                     audio_path, start_timestamp, end_timestamp, text,
-                    username, timestamp, marked
+                    username, timestamp, marked, human_reviewed
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 params,
@@ -382,10 +384,18 @@ class DatabaseBackend:
                     text TEXT NOT NULL DEFAULT '',
                     username TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
-                    marked BOOLEAN NOT NULL DEFAULT 0
+                    marked BOOLEAN NOT NULL DEFAULT 0,
+                    human_reviewed BOOLEAN NOT NULL DEFAULT 0
                 )
                 """
             )
+            try:
+                conn.execute(
+                    "ALTER TABLE clips ADD COLUMN human_reviewed BOOLEAN NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audio_metadata (
@@ -407,8 +417,15 @@ class DatabaseBackend:
                     text TEXT NOT NULL DEFAULT '',
                     username TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
-                    marked BOOLEAN NOT NULL DEFAULT FALSE
+                    marked BOOLEAN NOT NULL DEFAULT FALSE,
+                    human_reviewed BOOLEAN NOT NULL DEFAULT FALSE
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE clips
+                ADD COLUMN IF NOT EXISTS human_reviewed BOOLEAN NOT NULL DEFAULT FALSE
                 """
             )
             cur.execute(
@@ -457,6 +474,7 @@ class DatabaseBackend:
                 username,
                 timestamp,
                 marked,
+                human_reviewed,
             ) = row
             data = {
                 "id": clip_id,
@@ -467,6 +485,7 @@ class DatabaseBackend:
                 "username": username,
                 "timestamp": timestamp,
                 "marked": bool(marked),
+                "human_reviewed": bool(human_reviewed),
             }
 
         return ClipRecord(
@@ -478,4 +497,5 @@ class DatabaseBackend:
             username=data["username"],
             timestamp=data["timestamp"],
             marked=bool(data["marked"]),
+            human_reviewed=bool(data.get("human_reviewed", False)),
         )
