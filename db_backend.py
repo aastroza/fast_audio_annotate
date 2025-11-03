@@ -260,6 +260,17 @@ class DatabaseBackend:
         with self._postgres_cursor() as cur:
             cur.execute("DELETE FROM clips WHERE id = %s", (clip_id,))
 
+    def delete_clips_for_audio(self, audio_path: str) -> None:
+        """Delete all clips associated with ``audio_path``."""
+
+        if self.backend == "sqlite":
+            with self._sqlite_conn() as conn:
+                conn.execute("DELETE FROM clips WHERE audio_path = ?", (str(audio_path),))
+            return
+
+        with self._postgres_cursor() as cur:
+            cur.execute("DELETE FROM clips WHERE audio_path = %s", (str(audio_path),))
+
     def sync_audio_metadata(self, metadata_map: Mapping[str, Any]) -> None:
         """Insert or update metadata for the provided audio files."""
 
