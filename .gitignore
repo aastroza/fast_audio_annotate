@@ -42,3 +42,6 @@ audio/
 .sesskey
 .github/copilot-instructions.md
 scripts/clips_metadata.json
+
+# env
+.env
