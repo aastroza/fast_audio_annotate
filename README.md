@@ -130,18 +130,35 @@ If `database_url` is omitted (or set to `null`), the app stores annotations in
 `audio/annotations.db` using SQLite. Provide a Postgres connection string to use
 an external database instead.
 
-### Preprocessing audios with Whisper
+### Preprocessing audios with Whisper (Modal)
 
-Use the `scripts/preprocess_audio.py` helper to generate automatic transcripts for
-every audio file in the configured folder. The script uses the same Whisper model
-and language settings defined in `config.yaml` but can be overridden via CLI flags.
+The tool includes **cloud-based Whisper transcription** using [Modal](https://modal.com/), which automatically:
+- ✅ **Segments audio using VAD** (Voice Activity Detection) with configurable parameters
+- ✅ **Runs on cloud GPUs** (L40S by default) - no local GPU needed
+- ✅ **Generates word-level timestamps** (optional)
+- ✅ **Saves segments to database** with precise start/end times
 
 ```bash
-uv run python scripts/preprocess_audio.py --word-timestamps
+# Basic usage (uses Modal by default)
+python scripts/preprocess_audio.py --audio-folder ./audio --language es
+
+# With word-level timestamps
+python scripts/preprocess_audio.py --audio-folder ./audio --word-timestamps
+
+# Without VAD segmentation
+python scripts/preprocess_audio.py --audio-folder ./audio --no-vad
 ```
 
-By default, transcripts are written to `<audio_folder>/transcriptions`. Pass
-`--output` to save them elsewhere, or `--no-vad` to disable the VAD-based chunking.
+**First-time setup:**
+```bash
+# Install Modal
+pip install modal
+
+# Authenticate with Modal
+modal setup
+```
+
+By default, transcripts are written to `<audio_folder>/transcriptions/` as JSON files, and segments are stored in the database. See **[MODAL_TRANSCRIPTION_GUIDE.md](MODAL_TRANSCRIPTION_GUIDE.md)** for detailed documentation, configuration options, and troubleshooting.
 
 ## Using Neon (Optional)
 

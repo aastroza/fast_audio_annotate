@@ -35,22 +35,32 @@ class ModalSettings:
 
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04", add_python="3.12"
+    )
+    .env(
+        {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "HF_HOME": MODEL_DIR,
+        }
+    )
+    .apt_install("ffmpeg", "libsndfile1")
     .pip_install(
-        "torch==2.5.1",
-        "transformers==4.47.1",
-        "hf-transfer==0.1.8",
-        "huggingface_hub==0.27.0",
-        "librosa==0.10.2",
-        "soundfile==0.12.1",
-        "accelerate==1.2.1",
-        "datasets==3.2.0",
+        "torch==2.7.1",
+        "transformers==4.48.1",
+        "accelerate==1.3.0",
+        "evaluate==0.4.3",
+        "librosa==0.11.0",
+        "hf_transfer==0.1.9",
+        "huggingface_hub[hf-xet]==0.32.4",
+        "datasets[audio]==4.0.0",
+        "soundfile==0.13.1",
+        "jiwer==4.0.0",
         "pyloudnorm==0.1.1",
         "webrtcvad==2.0.10",
         "resampy==0.4.3",
-        "numpy==1.26.4",
     )
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "HF_HUB_CACHE": MODEL_DIR})
+    .entrypoint([])
 )
 
 model_cache = modal.Volume.from_name("hf-hub-cache", create_if_missing=True)
@@ -62,7 +72,7 @@ app = modal.App(
 )
 
 
-@app.cls(gpu="a10g", max_containers=10)
+@app.cls(gpu="L40S", timeout=60*10, scaledown_window=5, max_containers=10)
 class WhisperModel:
     """Remote Whisper inference that mirrors the local :class:`WhisperTranscriber`."""
 
@@ -77,7 +87,7 @@ class WhisperModel:
         import torch
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
-        torch_dtype = torch.float16
+        torch_dtype = torch.bfloat16
 
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
