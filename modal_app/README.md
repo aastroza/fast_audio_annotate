@@ -2,6 +2,35 @@
 
 Complete cloud-based audio transcription using Modal's serverless infrastructure.
 
+## 🆕 Two ASR Options Available
+
+This project now supports **two transcription approaches**:
+
+### Option 1: NeMo ASR + Integrated VAD (⭐ **Recommended for Spanish**)
+
+- ✅ **Native VAD**: Uses NVIDIA NeMo's integrated Voice Activity Detection
+- ✅ **Faster**: Parakeet models are lighter and faster than Whisper Large
+- ✅ **Better Spanish**: Optimized multilingual models (Canary, Parakeet)
+- ✅ **Precise Segmentation**: VAD shares feature extraction with ASR
+- 📖 **Guide**: See [`NEMO_GUIDE.md`](NEMO_GUIDE.md) for complete documentation
+
+```bash
+# Quick start with NeMo
+modal run modal_app/run_nemo.py::batch_transcription
+```
+
+### Option 2: Whisper + WebRTC VAD (Original)
+
+- ✅ **Word Timestamps**: Provides word-level timestamps
+- ✅ **Many Models**: Access to full Whisper model family
+- ✅ **Proven**: Stable, well-tested implementation
+- 📖 **Guide**: See below for Whisper documentation
+
+```bash
+# Quick start with Whisper
+modal run modal_app/run.py::batch_transcription --language es
+```
+
 ## Architecture Overview
 
 This implementation runs **ALL processing in Modal** (not hybrid):
@@ -17,10 +46,15 @@ This implementation runs **ALL processing in Modal** (not hybrid):
 modal_app/
 ├── app/
 │   ├── __init__.py
-│   ├── common.py          # Shared Modal config (app, image, volumes)
-│   ├── stage_data.py      # Upload audio files to Modal Volume
-│   └── transcription.py   # Batch transcription with VAD
-└── run.py                 # Modal entrypoints (@app.local_entrypoint)
+│   ├── common.py              # Shared Modal config (images, volumes)
+│   ├── stage_data.py          # Upload audio files to Modal Volume
+│   ├── transcription.py       # Whisper + WebRTC VAD (original)
+│   └── transcription_nemo.py  # 🆕 NeMo ASR + integrated VAD
+├── run.py                     # Whisper entrypoints
+├── run_nemo.py                # 🆕 NeMo entrypoints
+├── vad_config.yaml            # 🆕 NeMo VAD configuration template
+├── NEMO_GUIDE.md              # 🆕 Complete NeMo documentation
+└── README.md                  # This file
 ```
 
 ## Quick Start

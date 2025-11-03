@@ -1,0 +1,50 @@
+# NeMo VAD Configuration for Frame-based Voice Activity Detection
+# This configuration is used for detecting speech segments in audio files
+
+vad:
+  parameters:
+    # Window and shift lengths for VAD processing
+    window_length_in_sec: 0.15  # Duration of each analysis window in seconds
+    shift_length_in_sec: 0.01   # Shift between consecutive windows (frame rate)
+
+    # Smoothing configuration
+    smoothing: "median"  # Options: "median", "mean", or False
+    overlap: 0.5         # Overlap ratio for smoothing (0.0 to 1.0)
+
+    # Post-processing parameters for speech segment detection
+    postprocessing:
+      onset: 0.5              # Threshold to start speech segment (0.0 to 1.0)
+                              # Higher = more conservative, fewer false positives
+                              # Lower = more sensitive, may include more non-speech
+
+      offset: 0.5             # Threshold to end speech segment (0.0 to 1.0)
+                              # Higher = segments end sooner
+                              # Lower = segments continue longer
+
+      min_duration_on: 0.1    # Minimum speech segment duration in seconds
+                              # Segments shorter than this are discarded
+
+      min_duration_off: 0.3   # Minimum silence duration in seconds
+                              # Silence shorter than this doesn't split segments
+
+      filter_speech_first: true  # Apply speech filtering before segmentation
+
+# Recommended presets for different scenarios:
+#
+# Conservative (fewer segments, higher quality):
+#   onset: 0.7
+#   offset: 0.7
+#   min_duration_on: 0.3
+#   min_duration_off: 0.5
+#
+# Balanced (default):
+#   onset: 0.5
+#   offset: 0.5
+#   min_duration_on: 0.1
+#   min_duration_off: 0.3
+#
+# Sensitive (more segments, captures hesitations):
+#   onset: 0.3
+#   offset: 0.3
+#   min_duration_on: 0.05
+#   min_duration_off: 0.2

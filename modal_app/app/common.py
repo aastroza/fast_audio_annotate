@@ -5,7 +5,7 @@ MODEL_DIR = "/model"
 AUDIO_DIR = "/audio"
 RESULTS_DIR = "/results"
 
-# Modal image with all dependencies for audio processing and transcription
+# Modal image with Whisper + WebRTC VAD
 image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04", add_python="3.12"
@@ -37,6 +37,33 @@ image = (
         "pyloudnorm==0.1.1",
         "webrtcvad==2.0.10",
         "resampy==0.4.3",
+    )
+    .entrypoint([])
+)
+
+# Modal image with NeMo ASR + integrated VAD
+nemo_image = (
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04", add_python="3.12"
+    )
+    .env(
+        {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "HF_HOME": MODEL_DIR,
+            "CXX": "g++",
+            "CC": "g++",
+        }
+    )
+    .apt_install("ffmpeg", "libsndfile1")
+    .pip_install(
+        "torch==2.7.1",
+        "evaluate==0.4.3",
+        "librosa==0.11.0",
+        "soundfile==0.13.1",
+        "hf_transfer==0.1.9",
+        "huggingface_hub[hf-xet]==0.32.4",
+        "cuda-python==12.8.0",
+        "nemo_toolkit[asr]==2.3.1",
     )
     .entrypoint([])
 )
