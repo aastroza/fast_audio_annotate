@@ -26,23 +26,24 @@ A FastHTML audio transcription annotation tool - Streamlined, clip-focused audio
 ## Quick Start
 
 ```bash
-# Clone and install
+# Clone repository
 git clone https://github.com/yourusername/fast_audio_annotate.git
 cd fast_audio_annotate
-pip install .
+
+# Install dependencies
+pip install -r requirements.txt
 
 # Place audio files in audio/ folder
 mkdir -p audio
 cp your-audio-files.webm audio/
 
-# Run with uv (recommended)
-uv run python main.py
-
-# Or with regular Python
+# Run the web interface
 python main.py
 ```
 
 Open browser to `http://localhost:5001`
+
+**For Modal transcription setup**, see [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
 ## How to Annotate
 
@@ -130,18 +131,56 @@ If `database_url` is omitted (or set to `null`), the app stores annotations in
 `audio/annotations.db` using SQLite. Provide a Postgres connection string to use
 an external database instead.
 
-### Preprocessing audios with Whisper
+### Preprocessing audios with Whisper (Modal)
 
-Use the `scripts/preprocess_audio.py` helper to generate automatic transcripts for
-every audio file in the configured folder. The script uses the same Whisper model
-and language settings defined in `config.yaml` but can be overridden via CLI flags.
+The tool includes **cloud-based Whisper transcription** using [Modal](https://modal.com/), which automatically:
+- ✅ **Segments audio using VAD** (Voice Activity Detection) with configurable parameters
+- ✅ **Runs on cloud GPUs** (L40S by default) - no local GPU needed
+- ✅ **Generates word-level timestamps** (optional)
+- ✅ **Batch parallel processing** across multiple GPU workers
+- ✅ **Saves segments to database** with precise start/end times
+
+**Two architectures available:**
+
+#### Full Modal Architecture (Recommended)
+
+Everything runs in Modal - no local dependencies except Modal CLI:
 
 ```bash
-uv run python scripts/preprocess_audio.py --word-timestamps
+# First-time setup
+pip install modal
+modal setup
+
+cd modal_app
+
+# 1. Upload audio files to Modal Volume
+modal run.py::stage_data --audio-folder ./audio
+
+# 2. Batch transcribe all files (parallel processing)
+modal run.py::batch_transcription --language es --word-timestamps
+
+# 3. Download results
+modal volume get transcription-results ./results/
 ```
 
-By default, transcripts are written to `<audio_folder>/transcriptions`. Pass
-`--output` to save them elsewhere, or `--no-vad` to disable the VAD-based chunking.
+See **[modal_app/README.md](modal_app/README.md)** for complete documentation.
+
+#### Hybrid Architecture (Legacy)
+
+Local VAD processing + Modal transcription:
+
+```bash
+# Install local dependencies
+pip install -r requirements.txt
+
+# Quick test with single file
+modal run modal_run.py::test_transcription --audio-file ./audio/example.webm
+
+# Batch processing with database storage
+python scripts/preprocess_audio.py --audio-folder ./audio --language es
+```
+
+See **[MODAL_TRANSCRIPTION_GUIDE.md](MODAL_TRANSCRIPTION_GUIDE.md)** for detailed documentation.
 
 ## Using Neon (Optional)
 

@@ -1,12 +1,13 @@
 """Modal-backed Whisper transcription utilities."""
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 import modal
 import numpy as np
+
+if TYPE_CHECKING:
+    pass
 
 from .transcription import (
     ASR_SAMPLE_RATE,
@@ -35,22 +36,38 @@ class ModalSettings:
 
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04", add_python="3.12"
+    )
+    .env(
+        {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "HF_HOME": MODEL_DIR,
+        }
+    )
+    # Install build tools for webrtcvad compilation
+    .apt_install(
+        "ffmpeg",
+        "libsndfile1",
+        "build-essential",
+        "clang",
+    )
     .pip_install(
-        "torch==2.5.1",
-        "transformers==4.47.1",
-        "hf-transfer==0.1.8",
-        "huggingface_hub==0.27.0",
-        "librosa==0.10.2",
-        "soundfile==0.12.1",
-        "accelerate==1.2.1",
-        "datasets==3.2.0",
+        "torch==2.7.1",
+        "transformers==4.48.1",
+        "accelerate==1.3.0",
+        "evaluate==0.4.3",
+        "librosa==0.11.0",
+        "hf_transfer==0.1.9",
+        "huggingface_hub[hf-xet]==0.32.4",
+        "datasets[audio]==4.0.0",
+        "soundfile==0.13.1",
+        "jiwer==4.0.0",
         "pyloudnorm==0.1.1",
         "webrtcvad==2.0.10",
         "resampy==0.4.3",
-        "numpy==1.26.4",
     )
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "HF_HUB_CACHE": MODEL_DIR})
+    .entrypoint([])
 )
 
 model_cache = modal.Volume.from_name("hf-hub-cache", create_if_missing=True)
@@ -62,13 +79,13 @@ app = modal.App(
 )
 
 
-@app.cls(gpu="a10g", max_containers=10)
+@app.cls(gpu="L40S", timeout=60*10, scaledown_window=5, max_containers=10)
 class WhisperModel:
     """Remote Whisper inference that mirrors the local :class:`WhisperTranscriber`."""
 
-    # Use modal.parameter() instead of custom __init__
+    # Modal parameters - use empty string instead of None for optional language
     model_name: str = modal.parameter()
-    language: Optional[str] = modal.parameter(default=None)
+    language: str = modal.parameter(default="")  # Empty string = auto-detect
     return_word_timestamps: bool = modal.parameter(default=False)
     batch_size: int = modal.parameter(default=8)
 
@@ -77,7 +94,7 @@ class WhisperModel:
         import torch
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
-        torch_dtype = torch.float16
+        torch_dtype = torch.bfloat16
 
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
@@ -140,9 +157,10 @@ class ModalWhisperTranscriber:
             batch_size=batch_size,
         )
         # Use individual parameters instead of settings object
+        # Convert None to empty string for language (Modal doesn't support Optional)
         self._model = WhisperModel(
             model_name=model_name,
-            language=language,
+            language=language or "",
             return_word_timestamps=return_word_timestamps,
             batch_size=batch_size,
         )

@@ -2,4 +2,11 @@ python-fasthtml==0.12.33
 modal==1.2.1
 simple-parsing==0.1.7
 psycopg[binary,pool]
-ptyhon-dotenv
+python-dotenv
+numpy
+# Audio processing dependencies (needed locally for VAD)
+soundfile==0.13.1
+librosa==0.11.0
+webrtcvad==2.0.10
+pyloudnorm==0.1.1
+resampy==0.4.3
