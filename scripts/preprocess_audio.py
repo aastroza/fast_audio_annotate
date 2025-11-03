@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -21,6 +21,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from fast_audio_annotate.config import AppConfig, parse_app_config
 from fast_audio_annotate.metadata import iter_audio_files
+from fast_audio_annotate.modal_transcription import ModalWhisperTranscriber
 from fast_audio_annotate.transcription import WhisperTranscriber
 
 from db_backend import DatabaseBackend
@@ -50,6 +51,19 @@ def parse_args() -> argparse.Namespace:
         dest="database_url",
         help="Override the database URL defined in the config or environment.",
     )
+    parser.add_argument(
+        "--no-modal",
+        dest="use_modal",
+        action="store_false",
+        help="Run Whisper locally instead of delegating to Modal.",
+    )
+    parser.add_argument(
+        "--modal",
+        dest="use_modal",
+        action="store_true",
+        help="Force Whisper inference to run on Modal (default).",
+    )
+    parser.set_defaults(use_modal=True)
     return parser.parse_args()
 
 
@@ -103,13 +117,25 @@ def main() -> None:
     audio_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    transcriber = WhisperTranscriber(
-        model_name,
-        language=language,
-        return_word_timestamps=args.word_timestamps,
-        chunking_strategy=chunking_strategy,
-        batch_size=args.batch_size,
-    )
+    if args.use_modal:
+        print("Using Modal-backed Whisper transcriber.")
+        transcriber: Union[WhisperTranscriber, ModalWhisperTranscriber]
+        transcriber = ModalWhisperTranscriber(
+            model_name,
+            language=language,
+            return_word_timestamps=args.word_timestamps,
+            chunking_strategy=chunking_strategy,
+            batch_size=args.batch_size,
+        )
+    else:
+        print("Using local Whisper transcriber (Modal disabled).")
+        transcriber = WhisperTranscriber(
+            model_name,
+            language=language,
+            return_word_timestamps=args.word_timestamps,
+            chunking_strategy=chunking_strategy,
+            batch_size=args.batch_size,
+        )
 
     db_backend = DatabaseBackend(audio_dir / "annotations.db", database_url)
     print(f"Using database backend: {db_backend.backend_label()}")
