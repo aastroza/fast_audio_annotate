@@ -129,6 +129,52 @@ class DatabaseBackend:
 
         return [self._row_to_clip(row) for row in rows]
 
+    def fetch_random_clip(self, include_marked: bool = False, include_reviewed: bool = False) -> Optional[ClipRecord]:
+        """Return a random clip filtered by review/mark flags."""
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+
+        if not include_marked:
+            where_clauses.append("marked = ?" if self.backend == "sqlite" else "marked = %s")
+            params.append(False)
+        if not include_reviewed:
+            where_clauses.append("human_reviewed = ?" if self.backend == "sqlite" else "human_reviewed = %s")
+            params.append(False)
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        if self.backend == "sqlite":
+            with self._sqlite_conn() as conn:
+                cursor = conn.execute(
+                    f"""
+                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
+                           username, timestamp, marked, human_reviewed
+                    FROM clips{where_sql}
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                    """,
+                    tuple(params),
+                )
+                row = cursor.fetchone()
+        else:
+            with self._postgres_cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
+                           username, timestamp, marked, human_reviewed
+                    FROM clips{where_sql}
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                    """,
+                    tuple(params),
+                )
+                row = cur.fetchone()
+
+        return self._row_to_clip(row) if row else None
+
     def count_clips(self, audio_path: Optional[str] = None) -> int:
         """Return the number of clips, optionally filtered by audio path."""
 
