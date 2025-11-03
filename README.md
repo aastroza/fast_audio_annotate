@@ -26,23 +26,24 @@ A FastHTML audio transcription annotation tool - Streamlined, clip-focused audio
 ## Quick Start
 
 ```bash
-# Clone and install
+# Clone repository
 git clone https://github.com/yourusername/fast_audio_annotate.git
 cd fast_audio_annotate
-pip install .
+
+# Install dependencies
+pip install -r requirements.txt
 
 # Place audio files in audio/ folder
 mkdir -p audio
 cp your-audio-files.webm audio/
 
-# Run with uv (recommended)
-uv run python main.py
-
-# Or with regular Python
+# Run the web interface
 python main.py
 ```
 
 Open browser to `http://localhost:5001`
+
+**For Modal transcription setup**, see [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
 ## How to Annotate
 
