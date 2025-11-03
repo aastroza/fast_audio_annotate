@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/fast_annotate.egg-info/PKG-INFO
+src/fast_annotate.egg-info/SOURCES.txt
+src/fast_annotate.egg-info/dependency_links.txt
+src/fast_annotate.egg-info/requires.txt
+src/fast_annotate.egg-info/top_level.txt
+src/fast_audio_annotate/__init__.py
+src/fast_audio_annotate/config.py
+src/fast_audio_annotate/metadata.py
+src/fast_audio_annotate/transcription.py

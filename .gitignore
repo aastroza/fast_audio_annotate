@@ -34,11 +34,13 @@ images*/
 data/
 new_data/
 
+
 # Claude
 .claude/
 
 # Audios
 audio/
+audio-backup/
 .sesskey
 .github/copilot-instructions.md
 scripts/clips_metadata.json

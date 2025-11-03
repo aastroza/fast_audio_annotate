@@ -15,6 +15,10 @@ SRC_DIR = ROOT_DIR / "src"
 if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+# Add the root directory to sys.path to import db_backend
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from fast_audio_annotate.config import AppConfig, parse_app_config
 from fast_audio_annotate.metadata import iter_audio_files
 from fast_audio_annotate.transcription import WhisperTranscriber
