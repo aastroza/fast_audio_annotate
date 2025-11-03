@@ -3,5 +3,5 @@ description: "Annotate audio clips with transcriptions"
 audio_folder: "audio"
 max_history: 10
 metadata_filename: "metadata.json"
-whisper_model: "openai/whisper-large-v3"
+whisper_model: "whisper-1"
 transcription_language: "es"
