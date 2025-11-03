@@ -66,11 +66,11 @@ app = modal.App(
 class WhisperModel:
     """Remote Whisper inference that mirrors the local :class:`WhisperTranscriber`."""
 
-    def __init__(
-        self,
-        settings: ModalSettings,
-    ) -> None:
-        self.settings = settings
+    # Use modal.parameter() instead of custom __init__
+    model_name: str = modal.parameter()
+    language: Optional[str] = modal.parameter(default=None)
+    return_word_timestamps: bool = modal.parameter(default=False)
+    batch_size: int = modal.parameter(default=8)
 
     @modal.enter()
     def load_model(self) -> None:
@@ -79,9 +79,9 @@ class WhisperModel:
 
         torch_dtype = torch.float16
 
-        self.processor = AutoProcessor.from_pretrained(self.settings.model_name)
+        self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            self.settings.model_name,
+            self.model_name,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=True,
             use_safetensors=True,
@@ -97,8 +97,8 @@ class WhisperModel:
         )
 
         self.generate_kwargs: Dict[str, Union[str, bool]] = {"task": "transcribe"}
-        if self.settings.language:
-            self.generate_kwargs["language"] = self.settings.language
+        if self.language:
+            self.generate_kwargs["language"] = self.language
 
     @modal.batched(max_batch_size=64, wait_ms=1000)
     def transcribe_segments(self, audio_segments: List[np.ndarray]) -> List[Dict[str, object]]:
@@ -109,8 +109,8 @@ class WhisperModel:
 
         kwargs: Dict[str, object] = {
             "sampling_rate": ASR_SAMPLE_RATE,
-            "batch_size": min(len(audio_segments), self.settings.batch_size),
-            "return_timestamps": "word" if self.settings.return_word_timestamps else False,
+            "batch_size": min(len(audio_segments), self.batch_size),
+            "return_timestamps": "word" if self.return_word_timestamps else False,
             "generate_kwargs": self.generate_kwargs,
         }
 
@@ -139,7 +139,13 @@ class ModalWhisperTranscriber:
             return_word_timestamps=return_word_timestamps,
             batch_size=batch_size,
         )
-        self._model = WhisperModel(self.settings)
+        # Use individual parameters instead of settings object
+        self._model = WhisperModel(
+            model_name=model_name,
+            language=language,
+            return_word_timestamps=return_word_timestamps,
+            batch_size=batch_size,
+        )
 
     @staticmethod
     def load_audio(audio_path: Path) -> Tuple[np.ndarray, int]:
