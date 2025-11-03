@@ -137,42 +137,48 @@ The tool includes **cloud-based Whisper transcription** using [Modal](https://mo
 - ✅ **Segments audio using VAD** (Voice Activity Detection) with configurable parameters
 - ✅ **Runs on cloud GPUs** (L40S by default) - no local GPU needed
 - ✅ **Generates word-level timestamps** (optional)
+- ✅ **Batch parallel processing** across multiple GPU workers
 - ✅ **Saves segments to database** with precise start/end times
 
-**First-time setup:**
+**Two architectures available:**
+
+#### Full Modal Architecture (Recommended)
+
+Everything runs in Modal - no local dependencies except Modal CLI:
+
 ```bash
-# Install Modal
+# First-time setup
 pip install modal
-
-# Authenticate with Modal
 modal setup
+
+# 1. Upload audio files to Modal Volume
+modal run modal_app/run.py::stage_data --audio-folder ./audio
+
+# 2. Batch transcribe all files (parallel processing)
+modal run modal_app/run.py::batch_transcription --language es --word-timestamps
+
+# 3. Download results
+modal volume get transcription-results ./results/
 ```
 
-**Quick test with single file:**
-```bash
-# Test transcription (auto-detects first audio file)
-modal run modal_run.py::test_transcription
+See **[modal_app/README.md](modal_app/README.md)** for complete documentation.
 
-# Or specify a file
+#### Hybrid Architecture (Legacy)
+
+Local VAD processing + Modal transcription:
+
+```bash
+# Install local dependencies
+pip install -r requirements.txt
+
+# Quick test with single file
 modal run modal_run.py::test_transcription --audio-file ./audio/example.webm
-```
 
-**Transcribe single file:**
-```bash
-# Transcribe and save to JSON
-modal run modal_run.py::transcribe_file --audio-file ./audio/example.webm --output results.json
-```
-
-**Batch processing (multiple files):**
-```bash
-# Process entire directory with database storage
+# Batch processing with database storage
 python scripts/preprocess_audio.py --audio-folder ./audio --language es
-
-# With word-level timestamps
-python scripts/preprocess_audio.py --audio-folder ./audio --word-timestamps
 ```
 
-By default, transcripts are written to `<audio_folder>/transcriptions/` as JSON files, and segments are stored in the database. See **[MODAL_TRANSCRIPTION_GUIDE.md](MODAL_TRANSCRIPTION_GUIDE.md)** for detailed documentation, configuration options, and troubleshooting.
+See **[MODAL_TRANSCRIPTION_GUIDE.md](MODAL_TRANSCRIPTION_GUIDE.md)** for detailed documentation.
 
 ## Using Neon (Optional)
 
