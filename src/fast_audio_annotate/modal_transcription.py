@@ -1,12 +1,13 @@
 """Modal-backed Whisper transcription utilities."""
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 import modal
 import numpy as np
+
+if TYPE_CHECKING:
+    pass
 
 from .transcription import (
     ASR_SAMPLE_RATE,
