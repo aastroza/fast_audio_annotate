@@ -13,8 +13,6 @@ import modal
 from dotenv import load_dotenv
 from starlette.responses import FileResponse, Response
 
-from fasthtml.common import serve as fasthtml_serve
-
 from db_backend import ClipRecord, DatabaseBackend
 
 # ---------------------------------------------------------------------------
@@ -28,10 +26,7 @@ if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from fast_audio_annotate.config import AppConfig, parse_app_config  # noqa: E402
-from fast_audio_annotate.metadata import (  # noqa: E402
-    iter_audio_files,
-    load_audio_metadata_from_file,
-)
+from fast_audio_annotate.metadata import load_audio_metadata_from_file  # noqa: E402
 
 
 config: AppConfig = parse_app_config()
@@ -781,55 +776,29 @@ def get_audio(audio_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Modal integration
+# Entry points
 # ---------------------------------------------------------------------------
 
-def get_asgi_app():
-    """Return the FastHTML ASGI app instance for external servers."""
-
-    return fasthtml_app
-
-
-modal_app = modal.App("fast-audio-annotate")
-
-requirements_file = ROOT_DIR / "requirements.txt"
-image_builder = modal.Image.debian_slim(python_version="3.12")
-if requirements_file.exists():
-    if hasattr(image_builder, "pip_install_from_requirements"):
-        modal_image = image_builder.pip_install_from_requirements(str(requirements_file))
-    else:  # pragma: no cover - compatibility fallback
-        with requirements_file.open("r", encoding="utf-8") as handle:
-            packages = [line.strip() for line in handle if line.strip() and not line.startswith("#")]
-        for package in packages:
-            image_builder = image_builder.pip_install(package)
-        modal_image = image_builder
+if __name__ == "__main__":
+    fh.serve(app=fasthtml_app, host="localhost", port=5001)
 else:
-    modal_image = image_builder.pip_install("python-fasthtml==0.12.33")
+    app = modal.App(name="audio-annotation-tool")
 
+    data_volume = modal.Volume.from_name("audio-annotation-data", create_if_missing=True)
 
-@modal_app.function(image=modal_image)
-@modal.asgi_app()
-def serve():
-    """Expose the FastHTML app as an ASGI application on Modal."""
+    requirements_path = ROOT_DIR / "requirements.txt"
+    base_image = modal.Image.debian_slim(python_version="3.12")
+    if requirements_path.exists():
+        modal_image = base_image.pip_install_from_requirements(requirements_path)
+    else:  # pragma: no cover - fallback when requirements are missing
+        modal_image = base_image.pip_install("python-fasthtml==0.12.33")
 
-    return get_asgi_app()
-
-
-if __name__ == "__main__":  # pragma: no cover - manual execution helper
-    print(f"Starting {config.title}")
-    print("Configuration:")
-    print(f"  - Audio folder: {config.audio_folder}")
-    print(f"  - Database: {db_backend.backend_label()}")
-    print(f"  - Annotating as: {get_username()}")
-
-    audio_files = [path for path in iter_audio_files(config.audio_path)]
-    print(f"  - Total audio files: {len(audio_files)}")
-
-    total_clips = db_backend.count_clips()
-    print(f"  - Total clips: {total_clips}")
-
-    try:
-        fasthtml_serve(host="localhost", port=5001)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        print("Goodbye!")
+    @app.function(
+        image=modal_image,
+        volumes={"/data": data_volume},
+        allow_concurrent_inputs=100,
+        secrets=[modal.Secret.from_dotenv()],
+    )
+    @modal.asgi_app()
+    def serve():
+        return fasthtml_app
