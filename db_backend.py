@@ -514,7 +514,7 @@ class DatabaseBackend:
                     cursor.execute("""
                         SELECT 
                             username,
-                            COUNT(*) as contributions,
+                            COUNT(CASE WHEN human_reviewed = 1 THEN 1 END) as contributions,
                             COUNT(CASE WHEN human_reviewed = 1 THEN 1 END) as reviewed_clips
                         FROM clips 
                         WHERE username != 'unknown' AND username != '' AND username IS NOT NULL

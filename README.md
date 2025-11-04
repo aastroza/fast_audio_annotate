@@ -37,11 +37,40 @@ You can customize defaults through `config.yaml` (parsed on startup) or CLI argu
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `audio_folder` | `audio` | Directory containing source audio and the local annotations database. |
+| `audio_folder` | `audio` | Directory containing source audio and the local annotations database. For deployed apps, use a full URL to cloud storage (e.g., `https://storage.googleapis.com/your-bucket-name`). |
 | `metadata_filename` | `metadata.json` | File automatically scanned to populate clip metadata. |
 | `database_url` | `null` | PostgreSQL/Neon URL to use instead of the local SQLite database. |
 | `title` / `description` | App defaults | Copy shown in the page header. |
 | `whisper_model` | `openai/whisper-large-v3` | Base model used by preprocessing scripts when generating drafts. |
+
+### Remote Audio Storage
+
+When deploying the app to a cloud platform (instead of running locally), you'll need to host your audio files in cloud storage and configure CORS (Cross-Origin Resource Sharing) to allow browser access:
+
+#### Google Cloud Storage Example
+
+1. **Upload your audio files** to a Google Cloud Storage bucket
+2. **Configure CORS** to allow your deployed app's domain to access the files:
+   ```bash
+   # Create a cors.json file
+   echo '[{"origin": ["https://your-app-domain.com"], "method": ["GET"], "responseHeader": ["Content-Type"], "maxAgeSeconds": 3600}]' > cors.json
+   
+   # Apply CORS configuration to your bucket
+   gsutil cors set cors.json gs://your-bucket-name
+   ```
+3. **Update config.yaml** to point to your bucket:
+   ```yaml
+   audio_folder: "https://storage.googleapis.com/your-bucket-name"
+   ```
+
+#### Other Storage Providers
+
+Similar CORS configuration is needed for other cloud storage providers:
+- **AWS S3**: Configure CORS in the S3 bucket settings
+- **Azure Blob Storage**: Set CORS rules in the storage account
+- **Cloudflare R2**: Configure CORS policies in the R2 dashboard
+
+Make sure your storage allows `GET` requests from your deployed app's origin domain.
 
 ## Environment variables
 
