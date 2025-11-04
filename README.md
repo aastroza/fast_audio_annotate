@@ -15,7 +15,7 @@ The tool keeps track of every contribution, renders waveforms with WaveSurfer.js
 
 1. **Clone and enter the project**
    ```bash
-   git clone https://github.com/<your-user>/fast_audio_annotate.git
+   git clone https://github.com/aastroza/fast_audio_annotate.git
    cd fast_audio_annotate
    ```
 2. **Create an isolated environment (optional but recommended)**
@@ -72,6 +72,3 @@ The review UI is designed to make correcting clips fast while providing useful c
 - When reviewers interact with the interface, every action updates the clip record with the latest timestamps, text, reviewer name, and review status.
 - Flagging a clip flips its `marked` flag so it leaves the active queue, while completing a clip marks it as `human_reviewed` and ready for export.
 - `metadata.json` entries are loaded into the database at startup so additional fields (speaker, language, tags, etc.) can be displayed in the sidebar.
-
-These records can later be exported to Hugging Face or Weights & Biases using the scripts under `scripts/` and `export2*.py`.
-

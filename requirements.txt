@@ -1,4 +1,5 @@
 python-fasthtml==0.12.33
+python-multipart
 modal==1.2.1
 simple-parsing==0.1.7
 psycopg[binary,pool]
