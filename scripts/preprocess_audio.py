@@ -8,6 +8,8 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from dotenv import load_dotenv
@@ -32,6 +34,15 @@ AUDIO_EXTENSIONS = {
 }
 
 from db_backend import DatabaseBackend  # noqa: E402  pylint: disable=wrong-import-position
+
+
+@dataclass(frozen=True)
+class TranscriptionTask:
+    """Container with the metadata required to process an audio file."""
+
+    audio_path: Path
+    relative_audio_path: str
+    output_path: Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +86,18 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Run without modifying the database (still writes JSON if enabled).",
+    )
+    parser.add_argument(
+        "--transcribe-workers",
+        type=int,
+        dest="transcribe_workers",
+        help="Number of parallel workers used for transcription (defaults to min(available CPU, 4)).",
+    )
+    parser.add_argument(
+        "--db-workers",
+        type=int,
+        dest="db_workers",
+        help="Number of parallel workers used for database inserts (defaults to min(available CPU, 4)).",
     )
     return parser.parse_args()
 
@@ -147,6 +170,19 @@ def iter_audio_files(audio_dir: Path) -> Iterator[Path]:
     for path in sorted(audio_dir.rglob("*")):
         if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
             yield path
+
+
+def determine_worker_count(requested: Optional[int], task_count: int) -> int:
+    """Return a sensible worker count given a user hint and pending tasks."""
+
+    if requested is not None and requested > 0:
+        return requested
+
+    if task_count <= 0:
+        return 1
+
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(4, cpu_count, task_count))
 
 
 def create_openai_client() -> OpenAI:
@@ -232,6 +268,50 @@ def write_transcript_json(output_path: Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
+def process_transcription_task(
+    task: TranscriptionTask, model_name: str, language: Optional[str]
+) -> Dict[str, Any]:
+    """Run Whisper on ``task`` and return the serialized payload."""
+
+    print(f"Transcribing {task.relative_audio_path} with {model_name} via OpenAI Whisper...")
+    client = create_openai_client()
+    transcription = transcribe_audio(client, task.audio_path, model_name, language)
+    payload = transcription_to_payload(
+        transcription,
+        task.relative_audio_path,
+        model_name,
+        language,
+    )
+    write_transcript_json(task.output_path, payload)
+    print(f"Saved transcript to {task.output_path}")
+    return payload
+
+
+def store_segments(
+    db_backend: DatabaseBackend,
+    relative_audio_path: str,
+    segments: List[Dict[str, Any]],
+    username: str,
+    timestamp: str,
+) -> int:
+    """Persist ``segments`` for an audio file and return the number inserted."""
+
+    clip_values = [
+        {
+            "audio_path": relative_audio_path,
+            "start_timestamp": segment["start"],
+            "end_timestamp": segment["end"],
+            "text": segment["text"],
+            "username": username,
+            "timestamp": timestamp,
+            "marked": False,
+            "human_reviewed": False,
+        }
+        for segment in segments
+    ]
+    return db_backend.create_clips_bulk(clip_values)
+
+
 def transcribe_audio(
     client: OpenAI,
     audio_path: Path,
@@ -267,7 +347,6 @@ def main() -> None:
     audio_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    client = create_openai_client()
     db_backend = DatabaseBackend(audio_dir / "annotations.db", database_url)
     print(f"Using database backend: {db_backend.backend_label()}")
 
@@ -277,6 +356,7 @@ def main() -> None:
         print(f"No audio files found in {audio_dir}")
         return
 
+    tasks: List[TranscriptionTask] = []
     for audio_path in audio_files:
         relative_path = audio_path.relative_to(audio_dir)
         relative_audio_path = relative_path.as_posix()
@@ -293,44 +373,85 @@ def main() -> None:
             print(f"Clearing {existing_clip_count} existing clips for {relative_audio_path}...")
             db_backend.delete_clips_for_audio(relative_audio_path)
 
-        print(f"Transcribing {relative_audio_path} with {model_name} via OpenAI Whisper...")
-        try:
-            transcription = transcribe_audio(client, audio_path, model_name, language)
-        except Exception as exc:  # pragma: no cover - network errors
-            print(f"Failed to transcribe {relative_audio_path}: {exc}")
-            continue
-
-        payload = transcription_to_payload(
-            transcription,
-            relative_audio_path,
-            model_name,
-            language,
+        tasks.append(
+            TranscriptionTask(
+                audio_path=audio_path,
+                relative_audio_path=relative_audio_path,
+                output_path=output_path,
+            )
         )
-        write_transcript_json(output_path, payload)
-        print(f"Saved transcript to {output_path}")
 
-        if args.dry_run:
-            continue
+    if not tasks:
+        print("All audio files are already processed. Nothing to do.")
+        return
 
-        timestamp = datetime.now().isoformat()
-        inserted = 0
-        for segment in payload["segments"]:
-            clip_values = {
-                "audio_path": relative_audio_path,
-                "start_timestamp": segment["start"],
-                "end_timestamp": segment["end"],
-                "text": segment["text"],
-                "username": username,
-                "timestamp": timestamp,
-                "marked": False,
-                "human_reviewed": False,
+    transcribe_workers = determine_worker_count(args.transcribe_workers, len(tasks))
+    print(
+        f"Processing {len(tasks)} audio file{'s' if len(tasks) != 1 else ''} "
+        f"with {transcribe_workers} transcription worker{'s' if transcribe_workers != 1 else ''}."
+    )
+
+    db_executor: Optional[ThreadPoolExecutor] = None
+    if not args.dry_run:
+        db_workers = determine_worker_count(args.db_workers, len(tasks))
+        db_executor = ThreadPoolExecutor(max_workers=db_workers)
+
+    db_futures: Dict[Future[int], str] = {}
+
+    try:
+        with ThreadPoolExecutor(max_workers=transcribe_workers) as transcription_executor:
+            future_to_task = {
+                transcription_executor.submit(
+                    process_transcription_task,
+                    task,
+                    model_name,
+                    language,
+                ): task
+                for task in tasks
             }
-            db_backend.create_clip(clip_values)
-            inserted += 1
 
-        print(
-            f"Stored {inserted} clip{'s' if inserted != 1 else ''} for {relative_audio_path} in database"
-        )
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    payload = future.result()
+                except Exception as exc:  # pragma: no cover - network errors
+                    print(f"Failed to transcribe {task.relative_audio_path}: {exc}")
+                    continue
+
+                if args.dry_run or not db_executor:
+                    continue
+
+                segments = payload.get("segments", [])
+                if not segments:
+                    print(f"Stored 0 clips for {task.relative_audio_path} in database")
+                    continue
+
+                timestamp = datetime.now().isoformat()
+                db_future = db_executor.submit(
+                    store_segments,
+                    db_backend,
+                    task.relative_audio_path,
+                    segments,
+                    username,
+                    timestamp,
+                )
+                db_futures[db_future] = task.relative_audio_path
+
+        if db_executor:
+            for future in as_completed(db_futures):
+                relative_audio_path = db_futures[future]
+                try:
+                    inserted = future.result()
+                except Exception as exc:  # pragma: no cover - database errors
+                    print(f"Failed to store clips for {relative_audio_path}: {exc}")
+                else:
+                    print(
+                        f"Stored {inserted} clip{'s' if inserted != 1 else ''} "
+                        f"for {relative_audio_path} in database"
+                    )
+    finally:
+        if db_executor:
+            db_executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":

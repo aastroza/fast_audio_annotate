@@ -272,6 +272,53 @@ class DatabaseBackend:
             clip_id = cur.fetchone()[0]
         return self.get_clip(int(clip_id))
 
+    def create_clips_bulk(self, values_list: Iterable[Mapping[str, Any]]) -> int:
+        """Insert multiple clips in a single batch and return the number inserted."""
+
+        rows = [
+            (
+                str(values["audio_path"]),
+                float(values["start_timestamp"]),
+                float(values["end_timestamp"]),
+                values.get("text", ""),
+                values["username"],
+                values["timestamp"],
+                bool(values.get("marked", False)),
+                bool(values.get("human_reviewed", False)),
+            )
+            for values in values_list
+        ]
+
+        if not rows:
+            return 0
+
+        if self.backend == "sqlite":
+            with self._sqlite_conn() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO clips (
+                        audio_path, start_timestamp, end_timestamp, text,
+                        username, timestamp, marked, human_reviewed
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            return len(rows)
+
+        with self._postgres_cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO clips (
+                    audio_path, start_timestamp, end_timestamp, text,
+                    username, timestamp, marked, human_reviewed
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                rows,
+            )
+        return len(rows)
+
     def update_clip(self, clip_id: int, updates: dict) -> None:
         """Update a clip with the provided values."""
 
