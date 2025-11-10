@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -33,6 +37,8 @@ AUDIO_EXTENSIONS = {
     ".webm",
 }
 
+MAX_AUDIO_CHUNK_BYTES = 20 * 1024 * 1024
+
 from db_backend import DatabaseBackend  # noqa: E402  pylint: disable=wrong-import-position
 from src.fast_audio_annotate.metadata import load_audio_metadata_from_file  # noqa: E402  pylint: disable=wrong-import-position
 
@@ -44,6 +50,14 @@ class TranscriptionTask:
     audio_path: Path
     relative_audio_path: str
     output_path: Path
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    """Represents a temporary chunk created from a larger audio file."""
+
+    path: Path
+    duration_seconds: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,6 +143,137 @@ def load_simple_yaml(path: str) -> Dict[str, Any]:
             data[key] = value
     return data
 
+
+def probe_audio_duration(audio_path: Path) -> float:
+    """Return the duration of ``audio_path`` in seconds using ffprobe."""
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+        raise RuntimeError(
+            "ffprobe is required to determine audio duration. Please install ffmpeg."
+        ) from exc
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - depends on files
+        raise RuntimeError(f"Failed to determine duration for {audio_path}: {exc.stderr}") from exc
+
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def run_ffmpeg_segmentation(
+    audio_path: Path, output_pattern: Path, segment_duration: float, copy_stream: bool
+) -> None:
+    """Run ffmpeg to split ``audio_path`` into segments of ``segment_duration`` seconds."""
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(audio_path),
+        "-f",
+        "segment",
+        "-segment_time",
+        f"{segment_duration:.6f}",
+    ]
+    if copy_stream:
+        command.extend(["-c", "copy"])
+    command.append(str(output_pattern))
+
+    try:
+        subprocess.run(command, check=True)
+    except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+        raise RuntimeError("ffmpeg is required to chunk audio files. Please install ffmpeg.") from exc
+    except subprocess.CalledProcessError as exc:
+        if copy_stream:
+            run_ffmpeg_segmentation(audio_path, output_pattern, segment_duration, copy_stream=False)
+        else:
+            raise RuntimeError(f"ffmpeg failed to chunk {audio_path}: {exc.stderr}") from exc
+
+
+def split_audio_file(
+    audio_path: Path,
+    temp_dir: Path,
+    max_chunk_bytes: int,
+    duration: float,
+) -> List[Path]:
+    """Split ``audio_path`` into chunks respecting ``max_chunk_bytes``."""
+
+    file_size = audio_path.stat().st_size
+    if file_size <= max_chunk_bytes:
+        return [audio_path]
+
+    chunk_count = max(2, math.ceil(file_size / max_chunk_bytes))
+    if duration <= 0:
+        duration = 60.0 * chunk_count
+    segment_duration = max(1.0, duration / chunk_count)
+
+    attempt = 0
+    while attempt < 6:
+        attempt += 1
+        for existing in temp_dir.glob("chunk_*"):
+            if existing.exists():
+                existing.unlink()
+
+        output_pattern = temp_dir / f"chunk_%03d{audio_path.suffix}"
+        run_ffmpeg_segmentation(audio_path, output_pattern, segment_duration, copy_stream=True)
+
+        chunk_files = sorted(temp_dir.glob(f"chunk_*{audio_path.suffix}"))
+        if not chunk_files:
+            raise RuntimeError(f"ffmpeg did not produce any chunks for {audio_path}")
+
+        if all(chunk.stat().st_size <= max_chunk_bytes for chunk in chunk_files):
+            return chunk_files
+
+        # Reduce the segment duration and try again with more chunks.
+        chunk_count *= 2
+        segment_duration = max(1.0, duration / chunk_count)
+
+    raise RuntimeError(
+        f"Unable to split {audio_path} into chunks below {max_chunk_bytes / (1024 * 1024):.1f} MB"
+    )
+
+
+@contextmanager
+def audio_chunk_generator(audio_path: Path, max_chunk_bytes: int = MAX_AUDIO_CHUNK_BYTES):
+    """Yield ``AudioChunk`` entries representing ``audio_path`` split into pieces."""
+
+    file_size = audio_path.stat().st_size
+    if file_size <= max_chunk_bytes:
+        try:
+            duration = probe_audio_duration(audio_path)
+        except RuntimeError:
+            duration = 0.0
+        yield [AudioChunk(audio_path, duration)]
+        return
+
+    duration = probe_audio_duration(audio_path)
+    with tempfile.TemporaryDirectory(prefix="audio-chunks-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        chunk_paths = split_audio_file(audio_path, temp_dir, max_chunk_bytes, duration)
+        chunks: List[AudioChunk] = []
+        for chunk_path in chunk_paths:
+            chunk_duration = probe_audio_duration(chunk_path)
+            chunks.append(AudioChunk(chunk_path, chunk_duration))
+        yield chunks
 
 def resolve_audio_directory(args: argparse.Namespace, config: Dict[str, Any]) -> Path:
     candidate = args.audio_folder or config.get("audio_folder") or "audio"
@@ -272,13 +417,72 @@ def write_transcript_json(output_path: Path, payload: Dict[str, Any]) -> None:
 def process_transcription_task(
     task: TranscriptionTask, model_name: str, language: Optional[str]
 ) -> Dict[str, Any]:
-    """Run Whisper on ``task`` and return the serialized payload."""
+    """Run Whisper on ``task`` (chunking if required) and return the payload."""
 
     print(f"Transcribing {task.relative_audio_path} with {model_name} via OpenAI Whisper...")
     client = create_openai_client()
-    transcription = transcribe_audio(client, task.audio_path, model_name, language)
+
+    combined_segments: List[Dict[str, Any]] = []
+    combined_text_parts: List[str] = []
+    detected_language: Optional[str] = None
+
+    with audio_chunk_generator(task.audio_path) as chunks:
+        if len(chunks) > 1:
+            max_mb = MAX_AUDIO_CHUNK_BYTES / (1024 * 1024)
+            print(
+                f"Chunking {task.relative_audio_path} into {len(chunks)} parts "
+                f"(~{max_mb:.0f} MB each) to satisfy API limits..."
+            )
+
+        current_offset = 0.0
+        for index, chunk in enumerate(chunks, start=1):
+            if len(chunks) > 1:
+                print(
+                    f"Transcribing chunk {index}/{len(chunks)} "
+                    f"for {task.relative_audio_path}..."
+                )
+
+            transcription = transcribe_audio(client, chunk.path, model_name, language)
+            chunk_payload = transcription_to_payload(
+                transcription,
+                task.relative_audio_path,
+                model_name,
+                language,
+            )
+
+            chunk_language = chunk_payload.get("language")
+            if not detected_language and chunk_language:
+                detected_language = chunk_language
+
+            chunk_text = chunk_payload.get("text", "").strip()
+            if chunk_text:
+                combined_text_parts.append(chunk_text)
+
+            chunk_segments = chunk_payload.get("segments", [])
+            chunk_max_end = current_offset
+            for segment in chunk_segments:
+                adjusted_segment = {
+                    "id": len(combined_segments),
+                    "start": float(segment["start"]) + current_offset,
+                    "end": float(segment["end"]) + current_offset,
+                    "text": segment["text"],
+                }
+                combined_segments.append(adjusted_segment)
+                chunk_max_end = max(chunk_max_end, adjusted_segment["end"])
+
+            if chunk_segments:
+                current_offset = chunk_max_end
+            else:
+                current_offset += chunk.duration_seconds or chunk_payload.get("duration", 0.0)
+
+    final_transcription = {
+        "text": "\n".join(combined_text_parts).strip(),
+        "language": detected_language,
+        "segments": combined_segments,
+    }
+
     payload = transcription_to_payload(
-        transcription,
+        final_transcription,
         task.relative_audio_path,
         model_name,
         language,
