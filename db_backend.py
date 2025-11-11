@@ -26,6 +26,9 @@ class ClipRecord:
     timestamp: str
     marked: bool
     human_reviewed: bool
+    segment_path: Optional[str] = None
+    segment_start_timestamp: Optional[float] = None
+    segment_end_timestamp: Optional[float] = None
 
 
 @dataclass
@@ -76,11 +79,23 @@ class DatabaseBackend:
             with self._sqlite_conn() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips
-                    WHERE audio_path = ?
-                    ORDER BY start_timestamp
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    WHERE c.audio_path = ?
+                    ORDER BY c.start_timestamp
                     """,
                     (str(audio_path),),
                 )
@@ -89,11 +104,23 @@ class DatabaseBackend:
             with self._postgres_cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips
-                    WHERE audio_path = %s
-                    ORDER BY start_timestamp
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    WHERE c.audio_path = %s
+                    ORDER BY c.start_timestamp
                     """,
                     (str(audio_path),),
                 )
@@ -108,10 +135,22 @@ class DatabaseBackend:
             with self._sqlite_conn() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips
-                    ORDER BY id
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    ORDER BY c.id
                     """
                 )
                 rows = cursor.fetchall()
@@ -119,10 +158,22 @@ class DatabaseBackend:
             with self._postgres_cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips
-                    ORDER BY id
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    ORDER BY c.id
                     """
                 )
                 rows = cur.fetchall()
@@ -150,9 +201,22 @@ class DatabaseBackend:
             with self._sqlite_conn() as conn:
                 cursor = conn.execute(
                     f"""
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips{where_sql}
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    {where_sql}
                     ORDER BY RANDOM()
                     LIMIT 1
                     """,
@@ -163,9 +227,22 @@ class DatabaseBackend:
             with self._postgres_cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips{where_sql}
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    {where_sql}
                     ORDER BY RANDOM()
                     LIMIT 1
                     """,
@@ -204,10 +281,22 @@ class DatabaseBackend:
             with self._sqlite_conn() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips
-                    WHERE id = ?
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    WHERE c.id = ?
                     """,
                     (clip_id,),
                 )
@@ -216,10 +305,22 @@ class DatabaseBackend:
             with self._postgres_cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, audio_path, start_timestamp, end_timestamp, text,
-                           username, timestamp, marked, human_reviewed
-                    FROM clips
-                    WHERE id = %s
+                    SELECT
+                        c.id,
+                        c.audio_path,
+                        c.start_timestamp,
+                        c.end_timestamp,
+                        c.text,
+                        c.username,
+                        c.timestamp,
+                        c.marked,
+                        c.human_reviewed,
+                        s.segment_path,
+                        s.segment_start_timestamp,
+                        s.segment_end_timestamp
+                    FROM clips AS c
+                    LEFT JOIN clip_segments AS s ON s.clip_id = c.id
+                    WHERE c.id = %s
                     """,
                     (clip_id,),
                 )
@@ -319,6 +420,60 @@ class DatabaseBackend:
             )
         return len(rows)
 
+    def upsert_clip_segment(
+        self,
+        clip_id: int,
+        segment_path: str,
+        segment_start: float,
+        segment_end: float,
+    ) -> None:
+        """Create or update the stored audio segment for a clip."""
+
+        params = (
+            int(clip_id),
+            str(segment_path),
+            float(segment_start),
+            float(segment_end),
+        )
+
+        if self.backend == "sqlite":
+            with self._sqlite_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO clip_segments (
+                        clip_id,
+                        segment_path,
+                        segment_start_timestamp,
+                        segment_end_timestamp
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(clip_id) DO UPDATE SET
+                        segment_path = excluded.segment_path,
+                        segment_start_timestamp = excluded.segment_start_timestamp,
+                        segment_end_timestamp = excluded.segment_end_timestamp
+                    """,
+                    params,
+                )
+            return
+
+        with self._postgres_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO clip_segments (
+                    clip_id,
+                    segment_path,
+                    segment_start_timestamp,
+                    segment_end_timestamp
+                )
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (clip_id) DO UPDATE SET
+                    segment_path = EXCLUDED.segment_path,
+                    segment_start_timestamp = EXCLUDED.segment_start_timestamp,
+                    segment_end_timestamp = EXCLUDED.segment_end_timestamp
+                """,
+                params,
+            )
+
     def update_clip(self, clip_id: int, updates: dict) -> None:
         """Update a clip with the provided values."""
 
@@ -349,10 +504,12 @@ class DatabaseBackend:
 
         if self.backend == "sqlite":
             with self._sqlite_conn() as conn:
+                conn.execute("DELETE FROM clip_segments WHERE clip_id = ?", (clip_id,))
                 conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
             return
 
         with self._postgres_cursor() as cur:
+            cur.execute("DELETE FROM clip_segments WHERE clip_id = %s", (clip_id,))
             cur.execute("DELETE FROM clips WHERE id = %s", (clip_id,))
 
     def delete_clips_for_audio(self, audio_path: str) -> None:
@@ -360,10 +517,18 @@ class DatabaseBackend:
 
         if self.backend == "sqlite":
             with self._sqlite_conn() as conn:
+                conn.execute(
+                    "DELETE FROM clip_segments WHERE clip_id IN (SELECT id FROM clips WHERE audio_path = ?)",
+                    (str(audio_path),),
+                )
                 conn.execute("DELETE FROM clips WHERE audio_path = ?", (str(audio_path),))
             return
 
         with self._postgres_cursor() as cur:
+            cur.execute(
+                "DELETE FROM clip_segments WHERE clip_id IN (SELECT id FROM clips WHERE audio_path = %s)",
+                (str(audio_path),),
+            )
             cur.execute("DELETE FROM clips WHERE audio_path = %s", (str(audio_path),))
 
     def sync_audio_metadata(self, metadata_map: Mapping[str, Any]) -> None:
@@ -497,6 +662,17 @@ class DatabaseBackend:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clip_segments (
+                    clip_id INTEGER PRIMARY KEY,
+                    segment_path TEXT NOT NULL,
+                    segment_start_timestamp REAL NOT NULL,
+                    segment_end_timestamp REAL NOT NULL,
+                    FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE
+                )
+                """
+            )
 
     def _init_postgres(self) -> None:
         with self._postgres_cursor() as cur:
@@ -529,12 +705,23 @@ class DatabaseBackend:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clip_segments (
+                    clip_id BIGINT PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+                    segment_path TEXT NOT NULL,
+                    segment_start_timestamp DOUBLE PRECISION NOT NULL,
+                    segment_end_timestamp DOUBLE PRECISION NOT NULL
+                )
+                """
+            )
 
     @contextmanager
     def _sqlite_conn(self):
         conn = sqlite3.connect(self.sqlite_path)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA foreign_keys = ON;")
             yield conn
             conn.commit()
         finally:
@@ -644,6 +831,9 @@ class DatabaseBackend:
                 timestamp,
                 marked,
                 human_reviewed,
+                segment_path,
+                segment_start,
+                segment_end,
             ) = row
             data = {
                 "id": clip_id,
@@ -655,6 +845,9 @@ class DatabaseBackend:
                 "timestamp": timestamp,
                 "marked": bool(marked),
                 "human_reviewed": bool(human_reviewed),
+                "segment_path": segment_path,
+                "segment_start_timestamp": float(segment_start) if segment_start is not None else None,
+                "segment_end_timestamp": float(segment_end) if segment_end is not None else None,
             }
 
         return ClipRecord(
@@ -667,4 +860,17 @@ class DatabaseBackend:
             timestamp=data["timestamp"],
             marked=bool(data["marked"]),
             human_reviewed=bool(data.get("human_reviewed", False)),
+            segment_path=(
+                str(data["segment_path"]) if data.get("segment_path") is not None else None
+            ),
+            segment_start_timestamp=(
+                float(data["segment_start_timestamp"])
+                if data.get("segment_start_timestamp") is not None
+                else None
+            ),
+            segment_end_timestamp=(
+                float(data["segment_end_timestamp"])
+                if data.get("segment_end_timestamp") is not None
+                else None
+            ),
         )
