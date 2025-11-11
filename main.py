@@ -24,6 +24,7 @@ if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
 
 from fast_audio_annotate.config import AppConfig, parse_app_config
 from fast_audio_annotate.metadata import iter_audio_files, load_audio_metadata_from_file
+from fast_audio_annotate.segments import compute_segment_window
 
 from db_backend import ClipRecord, DatabaseBackend
 
@@ -39,6 +40,12 @@ db_backend = DatabaseBackend(config.audio_path / "annotations.db", database_url)
 
 
 load_audio_metadata_from_file(config.audio_path, db_backend, config.metadata_filename)
+
+# Runtime helpers for audio segments
+# Segment constants
+SEGMENT_PADDING_SECONDS = 5.0
+SEGMENT_SUBDIR_NAME = "segments"
+AUDIO_FOLDER_IS_REMOTE = config.audio_folder.startswith(("http://", "https://"))
 
 # Constants for the review workflow
 CLIP_PADDING_SECONDS = 1.5
@@ -137,7 +144,8 @@ def render_audio_metadata_panel(metadata: Optional[dict]):
 
 def select_random_clip() -> Optional[ClipRecord]:
     """Pick a random clip that still needs human review."""
-    return db_backend.fetch_random_clip()
+    clip = db_backend.fetch_random_clip()
+    return ensure_clip_segment(clip)
 
 
 def get_clip(clip_id: Optional[str]) -> Optional[ClipRecord]:
@@ -146,26 +154,92 @@ def get_clip(clip_id: Optional[str]) -> Optional[ClipRecord]:
     if not clip_id:
         return None
     try:
-        return db_backend.get_clip(int(clip_id))
+        clip = db_backend.get_clip(int(clip_id))
+        return ensure_clip_segment(clip)
     except (TypeError, ValueError):
         return None
 
 
-def compute_display_window(start: float, end: float, duration: Optional[float] = None) -> tuple[float, float]:
+def compute_display_window(
+    start: float,
+    end: float,
+    *,
+    lower_bound: float = 0.0,
+    upper_bound: Optional[float] = None,
+) -> tuple[float, float]:
     """Return the playback window that surrounds the clip with a safety margin."""
 
-    padded_start = max(0.0, start - CLIP_PADDING_SECONDS)
+    padded_start = max(lower_bound, start - CLIP_PADDING_SECONDS)
     padded_end = end + CLIP_PADDING_SECONDS
-    if duration is not None:
-        padded_end = min(duration, padded_end)
+
+    if upper_bound is not None:
+        padded_end = min(upper_bound, padded_end)
+
+    if padded_end <= padded_start:
+        minimal_length = max(end - start, 0.5)
+        padded_end = padded_start + minimal_length
+        if upper_bound is not None:
+            padded_end = min(upper_bound, padded_end)
+
     return padded_start, padded_end
+
+
+def ensure_clip_segment(clip: Optional[ClipRecord]) -> Optional[ClipRecord]:
+    """Attach stored segment metadata to ``clip`` if available."""
+
+    if clip is None:
+        return None
+
+    # When segment metadata is missing, synthesize a reasonable default window so the
+    # review UI still offers a focused playback range using the original audio file.
+    if clip.segment_start_timestamp is None or clip.segment_end_timestamp is None:
+        fallback_start, fallback_end = compute_segment_window(
+            clip.start_timestamp,
+            clip.end_timestamp,
+            padding=SEGMENT_PADDING_SECONDS,
+            lower_bound=0.0,
+        )
+        clip.segment_start_timestamp = fallback_start
+        clip.segment_end_timestamp = fallback_end
+
+    if not clip.segment_path:
+        return clip
+
+    if AUDIO_FOLDER_IS_REMOTE:
+        return clip
+
+    audio_root = config.audio_path
+    segment_path = audio_root / clip.segment_path
+    if segment_path.exists():
+        return clip
+
+    # If the stored segment path is stale, drop it so the frontend falls back to the
+    # original audio file without crashing.
+    clip.segment_path = None
+    return clip
 
 
 def render_clip_editor(clip: ClipRecord) -> Div:
     """Render the editor for a single clip."""
 
+    clip = ensure_clip_segment(clip)
     metadata = get_audio_metadata(clip.audio_path)
-    padded_start, padded_end = compute_display_window(clip.start_timestamp, clip.end_timestamp)
+    segment_offset = clip.segment_start_timestamp or 0.0
+    segment_end = clip.segment_end_timestamp
+    padded_start, padded_end = compute_display_window(
+        clip.start_timestamp,
+        clip.end_timestamp,
+        lower_bound=segment_offset,
+        upper_bound=segment_end,
+    )
+    relative_clip_start = max(0.0, clip.start_timestamp - segment_offset)
+    relative_clip_end = max(relative_clip_start, clip.end_timestamp - segment_offset)
+    relative_display_start = max(0.0, padded_start - segment_offset)
+    relative_display_end = max(relative_display_start, padded_end - segment_offset)
+    segment_duration = None
+    if segment_end is not None:
+        segment_duration = max(0.0, segment_end - segment_offset)
+    audio_path_for_playback = clip.segment_path or clip.audio_path
     duration = clip.end_timestamp - clip.start_timestamp
 
     instructions = Div(
@@ -178,7 +252,7 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         style="margin-bottom: 18px; background: #f8f9fa; padding: 16px; border-radius: 8px; border: 1px solid #dee2e6;"
     )
 
-    clip_info = Div(
+    clip_info_entries = [
         Div(
             Strong("Audio file:"),
             Span(f" {clip.audio_path}"),
@@ -189,10 +263,30 @@ def render_clip_editor(clip: ClipRecord) -> Div:
             Span(f" {clip.start_timestamp:.2f}s – {clip.end_timestamp:.2f}s ({duration:.2f}s long)"),
             style="margin-bottom: 4px;"
         ),
+    ]
+
+    if clip.segment_start_timestamp is not None and clip.segment_end_timestamp is not None:
+        segment_context = clip.segment_end_timestamp - clip.segment_start_timestamp
+        clip_info_entries.append(
+            Div(
+                Strong("Segment window:"),
+                Span(
+                    f" {clip.segment_start_timestamp:.2f}s – {clip.segment_end_timestamp:.2f}s "
+                    f"({segment_context:.2f}s total)"
+                ),
+                style="margin-bottom: 4px;"
+            )
+        )
+
+    clip_info_entries.append(
         Div(
             Strong("Last updated by:"),
             Span(f" {clip.username} at {clip.timestamp}"),
-        ),
+        )
+    )
+
+    clip_info = Div(
+        *clip_info_entries,
         style="margin-bottom: 16px; display: flex; flex-direction: column; gap: 4px;"
     )
 
@@ -360,11 +454,16 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         actions,
         metadata_panel,
         id="main-content",
-        data_audio_path=str(clip.audio_path),
+        data_audio_path=str(audio_path_for_playback),
+        data_original_audio_path=str(clip.audio_path),
         data_clip_start=f"{clip.start_timestamp:.2f}",
         data_clip_end=f"{clip.end_timestamp:.2f}",
         data_display_start=f"{padded_start:.2f}",
-        data_display_end=f"{padded_end:.2f}"
+        data_display_end=f"{padded_end:.2f}",
+        data_segment_offset=f"{segment_offset:.2f}",
+        data_segment_duration=(
+            f"{segment_duration:.2f}" if segment_duration is not None else ""
+        )
     )
 
 
@@ -474,14 +573,45 @@ def index():
                 }
 
                 const audioPath = mainContent.dataset.audioPath;
-                const clipStart = parseFloat(mainContent.dataset.clipStart || '0');
-                const clipEnd = parseFloat(mainContent.dataset.clipEnd || '0');
-                const displayStart = parseFloat(mainContent.dataset.displayStart || clipStart);
-                const displayEnd = parseFloat(mainContent.dataset.displayEnd || clipEnd);
+                const segmentOffset = parseFloat(mainContent.dataset.segmentOffset || '0');
+                const segmentDuration = parseFloat(mainContent.dataset.segmentDuration || '0');
+                const clipStartAbsolute = parseFloat(mainContent.dataset.clipStart || '0');
+                const clipEndAbsolute = parseFloat(mainContent.dataset.clipEnd || '0');
+                const displayStartAbsolute = parseFloat(mainContent.dataset.displayStart || clipStartAbsolute);
+                const displayEndAbsolute = parseFloat(mainContent.dataset.displayEnd || clipEndAbsolute);
+
+                const clipStart = Math.max(0, clipStartAbsolute - segmentOffset);
+                const clipEnd = Math.max(clipStart, clipEndAbsolute - segmentOffset);
+                let displayStart = Math.max(0, displayStartAbsolute - segmentOffset);
+                let displayEnd = Math.max(displayStart, displayEndAbsolute - segmentOffset);
+
+                if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                    displayStart = Math.min(displayStart, segmentDuration);
+                    displayEnd = Math.min(displayEnd, segmentDuration);
+                }
 
                 if (!audioPath) {
                     return;
                 }
+
+                const startInput = document.getElementById('start-time-input');
+                const endInput = document.getElementById('end-time-input');
+
+                const clampRelativeTime = (value) => {
+                    let result = Math.max(0, value);
+                    if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                        result = Math.min(result, segmentDuration);
+                    }
+                    return result;
+                };
+
+                const updateInputsFromRegion = () => {
+                    if (!currentRegion) return;
+                    const absoluteStart = segmentOffset + currentRegion.start;
+                    const absoluteEnd = segmentOffset + currentRegion.end;
+                    if (startInput) startInput.value = absoluteStart.toFixed(2);
+                    if (endInput) endInput.value = absoluteEnd.toFixed(2);
+                };
 
                 wavesurfer = WaveSurfer.create({
                     container: '#waveform',
@@ -517,12 +647,8 @@ def index():
                         resize: true,
                     });
 
-                    currentRegion.on('update', () => {
-                        const startInput = document.getElementById('start-time-input');
-                        const endInput = document.getElementById('end-time-input');
-                        if (startInput) startInput.value = currentRegion.start.toFixed(2);
-                        if (endInput) endInput.value = currentRegion.end.toFixed(2);
-                    });
+                    currentRegion.on('update', updateInputsFromRegion);
+                    updateInputsFromRegion();
 
                     const viewDuration = Math.max(0.5, displayEnd - displayStart);
                     const pxPerSec = Math.max(120, 900 / viewDuration);
@@ -533,22 +659,21 @@ def index():
                 const updateCurrentTime = () => {
                     const timeDisplay = document.getElementById('current-time');
                     if (timeDisplay && wavesurfer) {
-                        timeDisplay.textContent = wavesurfer.getCurrentTime().toFixed(2);
+                        const absoluteTime = segmentOffset + wavesurfer.getCurrentTime();
+                        timeDisplay.textContent = absoluteTime.toFixed(2);
                     }
                 };
 
                 wavesurfer.on('audioprocess', updateCurrentTime);
                 wavesurfer.on('pause', updateCurrentTime);
 
-                const startInput = document.getElementById('start-time-input');
-                const endInput = document.getElementById('end-time-input');
-
                 if (startInput) {
                     startInput.addEventListener('input', (event) => {
                         if (!currentRegion) return;
                         const value = parseFloat(event.target.value);
                         if (!Number.isNaN(value)) {
-                            currentRegion.setOptions({ start: value });
+                            const desiredStart = clampRelativeTime(value - segmentOffset);
+                            currentRegion.setOptions({ start: Math.min(desiredStart, currentRegion.end) });
                         }
                     });
                 }
@@ -558,7 +683,8 @@ def index():
                         if (!currentRegion) return;
                         const value = parseFloat(event.target.value);
                         if (!Number.isNaN(value)) {
-                            currentRegion.setOptions({ end: value });
+                            const desiredEnd = clampRelativeTime(value - segmentOffset);
+                            currentRegion.setOptions({ end: Math.max(desiredEnd, currentRegion.start) });
                         }
                     });
                 }
@@ -570,8 +696,12 @@ def index():
 
                 if (playButton) {
                     playButton.addEventListener('click', () => {
-                        const start = Math.max(0, (currentRegion ? currentRegion.start : clipStart) - 0.2);
-                        const end = currentRegion ? currentRegion.end + 0.2 : clipEnd;
+                        let start = Math.max(0, (currentRegion ? currentRegion.start : clipStart) - 0.2);
+                        let end = currentRegion ? currentRegion.end + 0.2 : clipEnd;
+                        if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                            start = Math.max(0, Math.min(start, segmentDuration));
+                            end = Math.max(start, Math.min(end, segmentDuration));
+                        }
                         wavesurfer.play(start, end);
                     });
                 }
@@ -607,24 +737,26 @@ def index():
                         if (wavesurfer.isPlaying()) {
                             wavesurfer.pause();
                         } else {
-                            const start = Math.max(0, (currentRegion ? currentRegion.start : clipStart) - 0.2);
-                            const end = currentRegion ? currentRegion.end + 0.2 : clipEnd;
+                            let start = Math.max(0, (currentRegion ? currentRegion.start : clipStart) - 0.2);
+                            let end = currentRegion ? currentRegion.end + 0.2 : clipEnd;
+                            if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                                start = Math.max(0, Math.min(start, segmentDuration));
+                                end = Math.max(start, Math.min(end, segmentDuration));
+                            }
                             wavesurfer.play(start, end);
                         }
                     }
                     if (event.key.toLowerCase() === 'q' && currentRegion) {
                         event.preventDefault();
-                        const time = wavesurfer.getCurrentTime();
-                        currentRegion.setOptions({ start: time });
-                        const startInputEl = document.getElementById('start-time-input');
-                        if (startInputEl) startInputEl.value = time.toFixed(2);
+                        const time = clampRelativeTime(wavesurfer.getCurrentTime());
+                        currentRegion.setOptions({ start: Math.min(time, currentRegion.end) });
+                        updateInputsFromRegion();
                     }
                     if (event.key.toLowerCase() === 'w' && currentRegion) {
                         event.preventDefault();
-                        const time = wavesurfer.getCurrentTime();
-                        currentRegion.setOptions({ end: time });
-                        const endInputEl = document.getElementById('end-time-input');
-                        if (endInputEl) endInputEl.value = time.toFixed(2);
+                        const time = clampRelativeTime(wavesurfer.getCurrentTime());
+                        currentRegion.setOptions({ end: Math.max(time, currentRegion.start) });
+                        updateInputsFromRegion();
                     }
                 });
             }
@@ -724,7 +856,7 @@ def get_styles():
 
 
 # Only create local audio route if audio_folder is a local path (not a URL)
-if not config.audio_folder.startswith(('http://', 'https://')):
+if not AUDIO_FOLDER_IS_REMOTE:
     @rt(f"/{config.audio_folder}/{{audio_name:path}}")
     def get_audio(audio_name: str):
         """Serve audio files with security checks."""
