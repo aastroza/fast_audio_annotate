@@ -446,6 +446,19 @@ def render_clip_editor(clip: ClipRecord) -> Div:
 
     metadata_panel = render_audio_metadata_panel(metadata)
 
+    data_attributes = {
+        "data-audio-path": str(audio_path_for_playback),
+        "data-original-audio-path": str(clip.audio_path),
+        "data-clip-start": f"{clip.start_timestamp:.2f}",
+        "data-clip-end": f"{clip.end_timestamp:.2f}",
+        "data-display-start": f"{padded_start:.2f}",
+        "data-display-end": f"{padded_end:.2f}",
+        "data-segment-offset": f"{segment_offset:.2f}",
+        "data-segment-duration": (
+            f"{segment_duration:.2f}" if segment_duration is not None else ""
+        ),
+    }
+
     return Div(
         instructions,
         clip_info,
@@ -454,16 +467,7 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         actions,
         metadata_panel,
         id="main-content",
-        data_audio_path=str(audio_path_for_playback),
-        data_original_audio_path=str(clip.audio_path),
-        data_clip_start=f"{clip.start_timestamp:.2f}",
-        data_clip_end=f"{clip.end_timestamp:.2f}",
-        data_display_start=f"{padded_start:.2f}",
-        data_display_end=f"{padded_end:.2f}",
-        data_segment_offset=f"{segment_offset:.2f}",
-        data_segment_duration=(
-            f"{segment_duration:.2f}" if segment_duration is not None else ""
-        )
+        **data_attributes,
     )
 
 
