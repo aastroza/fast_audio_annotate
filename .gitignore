@@ -48,3 +48,4 @@ scripts/clips_metadata.json
 # env
 .env
 generate_metadata.py
+GCS.md
