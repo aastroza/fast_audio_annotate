@@ -26,6 +26,8 @@ class ClipRecord:
     timestamp: str
     marked: bool
     human_reviewed: bool
+    relative_start_offset: Optional[float] = None
+    relative_end_offset: Optional[float] = None
     segment_path: Optional[str] = None
     segment_start_timestamp: Optional[float] = None
     segment_end_timestamp: Optional[float] = None
@@ -89,6 +91,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -114,6 +118,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -145,6 +151,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -168,6 +176,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -211,6 +221,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -237,6 +249,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -291,6 +305,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -315,6 +331,8 @@ class DatabaseBackend:
                         c.timestamp,
                         c.marked,
                         c.human_reviewed,
+                        c.relative_start_offset,
+                        c.relative_end_offset,
                         s.segment_path,
                         s.segment_start_timestamp,
                         s.segment_end_timestamp
@@ -643,7 +661,9 @@ class DatabaseBackend:
                     username TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     marked BOOLEAN NOT NULL DEFAULT 0,
-                    human_reviewed BOOLEAN NOT NULL DEFAULT 0
+                    human_reviewed BOOLEAN NOT NULL DEFAULT 0,
+                    relative_start_offset REAL,
+                    relative_end_offset REAL
                 )
                 """
             )
@@ -654,6 +674,14 @@ class DatabaseBackend:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+            for column in ("relative_start_offset", "relative_end_offset"):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE clips ADD COLUMN {column} REAL"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audio_metadata (
@@ -687,7 +715,9 @@ class DatabaseBackend:
                     username TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     marked BOOLEAN NOT NULL DEFAULT FALSE,
-                    human_reviewed BOOLEAN NOT NULL DEFAULT FALSE
+                    human_reviewed BOOLEAN NOT NULL DEFAULT FALSE,
+                    relative_start_offset DOUBLE PRECISION,
+                    relative_end_offset DOUBLE PRECISION
                 )
                 """
             )
@@ -695,6 +725,18 @@ class DatabaseBackend:
                 """
                 ALTER TABLE clips
                 ADD COLUMN IF NOT EXISTS human_reviewed BOOLEAN NOT NULL DEFAULT FALSE
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE clips
+                ADD COLUMN IF NOT EXISTS relative_start_offset DOUBLE PRECISION
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE clips
+                ADD COLUMN IF NOT EXISTS relative_end_offset DOUBLE PRECISION
                 """
             )
             cur.execute(
@@ -831,6 +873,8 @@ class DatabaseBackend:
                 timestamp,
                 marked,
                 human_reviewed,
+                relative_start_offset,
+                relative_end_offset,
                 segment_path,
                 segment_start,
                 segment_end,
@@ -845,6 +889,16 @@ class DatabaseBackend:
                 "timestamp": timestamp,
                 "marked": bool(marked),
                 "human_reviewed": bool(human_reviewed),
+                "relative_start_offset": (
+                    float(relative_start_offset)
+                    if relative_start_offset is not None
+                    else None
+                ),
+                "relative_end_offset": (
+                    float(relative_end_offset)
+                    if relative_end_offset is not None
+                    else None
+                ),
                 "segment_path": segment_path,
                 "segment_start_timestamp": float(segment_start) if segment_start is not None else None,
                 "segment_end_timestamp": float(segment_end) if segment_end is not None else None,
@@ -860,6 +914,16 @@ class DatabaseBackend:
             timestamp=data["timestamp"],
             marked=bool(data["marked"]),
             human_reviewed=bool(data.get("human_reviewed", False)),
+            relative_start_offset=(
+                float(data["relative_start_offset"])
+                if data.get("relative_start_offset") is not None
+                else None
+            ),
+            relative_end_offset=(
+                float(data["relative_end_offset"])
+                if data.get("relative_end_offset") is not None
+                else None
+            ),
             segment_path=(
                 str(data["segment_path"]) if data.get("segment_path") is not None else None
             ),
