@@ -252,6 +252,7 @@ def render_clip_editor(clip: ClipRecord) -> Div:
 
     clip = ensure_clip_segment(clip)
     metadata = get_audio_metadata(clip.audio_path)
+    clip_permalink = f"/clip/{clip.id}"
 
     # If there is no segment file, we cannot show the waveform for this clip.
     if not clip.segment_path:
@@ -352,9 +353,45 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         )
     )
 
+    clip_info_entries.append(
+        Div(
+            Strong("Clip ID:"),
+            Span(f" {clip.id}"),
+            style="margin-bottom: 4px;",
+        )
+    )
+
     clip_info = Div(
         *clip_info_entries,
         style="margin-bottom: 16px; display: flex; flex-direction: column; gap: 4px;"
+    )
+
+    share_controls = Div(
+        Label("Share this clip", style="display: block; margin-bottom: 6px; font-weight: 600;"),
+        Div(
+            Input(
+                type="text",
+                id="share-link-input",
+                readonly=True,
+                value=clip_permalink,
+                style="flex: 1; padding: 10px; border: 1px solid #ced4da; border-radius: 6px; font-size: 14px;",
+            ),
+            Button(
+                "Copy link",
+                type="button",
+                id="copy-share-link",
+                style=(
+                    "margin-left: 8px; padding: 10px 16px; border-radius: 6px; background: #6610f2; color: white; "
+                    "border: none; font-size: 14px; cursor: pointer;"
+                ),
+            ),
+            style="display: flex; align-items: center;",
+        ),
+        Div(
+            "Anyone with this link can open the clip directly in the editor.",
+            style="font-size: 12px; color: #6c757d; margin-top: 4px; font-style: italic;",
+        ),
+        style="margin-bottom: 16px;",
     )
 
     form_inputs = Div(
@@ -543,11 +580,13 @@ def render_clip_editor(clip: ClipRecord) -> Div:
     return Div(
         instructions,
         clip_info,
+        share_controls,
         waveform,
         form_inputs,
         actions,
         metadata_panel,
         id="main-content",
+        data_clip_id=str(clip.id),
         data_audio_path=str(audio_path_for_playback),
         data_original_audio_path=str(clip.audio_path),
         data_clip_start=f"{clip.start_timestamp:.2f}",
@@ -644,306 +683,387 @@ def render_contributor_stats() -> Div:
         return Div()  # Return empty div on error
 
 
+APP_SCRIPT = Script("""
+    let wavesurfer = null;
+    let wsRegions = null;
+    let currentRegion = null;
+
+    function initWaveSurfer() {
+        if (wavesurfer) {
+            wavesurfer.destroy();
+            wavesurfer = null;
+        }
+
+        const mainContent = document.getElementById('main-content');
+        if (!mainContent) {
+            return;
+        }
+
+        const audioPath = mainContent.dataset.audioPath;
+        const segmentOffset = parseFloat(mainContent.dataset.segmentOffset || '0');
+        const segmentDuration = parseFloat(mainContent.dataset.segmentDuration || '0');
+        const clipStartAbsolute = parseFloat(mainContent.dataset.clipStart || '0');
+        const clipEndAbsolute = parseFloat(mainContent.dataset.clipEnd || '0');
+        const displayStartAbsolute = parseFloat(mainContent.dataset.displayStart || clipStartAbsolute);
+        const displayEndAbsolute = parseFloat(mainContent.dataset.displayEnd || clipEndAbsolute);
+        const isSegmentAudio = true; // we always play the segment audio now
+
+        const clipStartRelative = Math.max(0, clipStartAbsolute - segmentOffset);
+        const clipEndRelative = Math.max(clipStartRelative, clipEndAbsolute - segmentOffset);
+        let displayStartRelative = Math.max(0, displayStartAbsolute - segmentOffset);
+        let displayEndRelative = Math.max(displayStartRelative, displayEndAbsolute - segmentOffset);
+
+        if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+            displayStartRelative = Math.min(displayStartRelative, segmentDuration);
+            displayEndRelative = Math.min(displayEndRelative, segmentDuration);
+        }
+
+        if (!audioPath) {
+            return;
+        }
+
+        const startInput = document.getElementById('start-time-input');
+        const endInput = document.getElementById('end-time-input');
+        const startHiddenInput = document.getElementById('start-time-hidden');
+        const endHiddenInput = document.getElementById('end-time-hidden');
+        const startRelativeHiddenInput = document.getElementById('start-time-relative-hidden');
+        const endRelativeHiddenInput = document.getElementById('end-time-relative-hidden');
+
+        const clampRelativeTime = (value) => {
+            let result = Number.isFinite(value) ? value : 0;
+            result = Math.max(0, result);
+            if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                result = Math.min(result, segmentDuration);
+            }
+            return result;
+        };
+
+        const toWaveformTime = (relativeValue) => {
+            // Segment audio: waveform timeline is 0..segmentDuration
+            if (!Number.isFinite(relativeValue)) return relativeValue;
+            return relativeValue;
+        };
+
+        const fromWaveformTime = (waveformValue) => {
+            if (!Number.isFinite(waveformValue)) return waveformValue;
+            return waveformValue;
+        };
+
+        const updateInputsFromRegion = () => {
+            if (!currentRegion) return;
+            const startRelative = clampRelativeTime(fromWaveformTime(currentRegion.start));
+            const endRelative = clampRelativeTime(fromWaveformTime(currentRegion.end));
+            if (startInput) startInput.value = startRelative.toFixed(2);
+            if (endInput) endInput.value = endRelative.toFixed(2);
+            if (startHiddenInput) startHiddenInput.value = (segmentOffset + startRelative).toFixed(6);
+            if (endHiddenInput) endHiddenInput.value = (segmentOffset + endRelative).toFixed(6);
+            if (startRelativeHiddenInput) startRelativeHiddenInput.value = startRelative.toFixed(6);
+            if (endRelativeHiddenInput) endRelativeHiddenInput.value = endRelative.toFixed(6);
+        };
+
+        wavesurfer = WaveSurfer.create({
+            container: '#waveform',
+            waveColor: '#4F4A85',
+            progressColor: '#383351',
+            height: 140,
+            barWidth: 2,
+            barGap: 1,
+            barRadius: 2,
+            responsive: true,
+        });
+
+        wsRegions = wavesurfer.registerPlugin(WaveSurfer.Regions.create());
+        const formatTimelineLabel = (seconds) => {
+            const relativeSeconds = clampRelativeTime(fromWaveformTime(seconds));
+
+            if (!Number.isNaN(segmentDuration) && relativeSeconds > segmentDuration) {
+                return '';
+            }
+
+            if (relativeSeconds >= 100) return relativeSeconds.toFixed(0);
+            if (relativeSeconds >= 10) return relativeSeconds.toFixed(1);
+            return relativeSeconds.toFixed(2);
+        };
+        wavesurfer.registerPlugin(WaveSurfer.Timeline.create({
+            container: '#timeline',
+            formatTimeCallback: formatTimelineLabel,
+        }));
+
+        // Build audio URL depending on whether audio_folder is local or remote
+        const audioFolder = '""" + f"{config.audio_folder}" + """';
+        const audioUrl = audioFolder.startsWith('http')
+            ? audioFolder + '/' + audioPath
+            : '/' + audioFolder + '/' + audioPath;
+
+        wavesurfer.load(audioUrl);
+
+        wavesurfer.on('ready', () => {
+            wsRegions.clearRegions();
+            currentRegion = wsRegions.addRegion({
+                start: toWaveformTime(clipStartRelative),
+                end: toWaveformTime(clipEndRelative),
+                color: 'rgba(13, 110, 253, 0.3)',
+                drag: true,
+                resize: true,
+            });
+
+            currentRegion.on('update', updateInputsFromRegion);
+            currentRegion.on('update-end', () => {
+                if (!currentRegion) return;
+                const startRelative = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                const endRelative = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                const clampedStart = toWaveformTime(startRelative);
+                const clampedEnd = toWaveformTime(Math.max(endRelative, startRelative));
+                if (clampedStart !== currentRegion.start || clampedEnd !== currentRegion.end) {
+                    currentRegion.setOptions({ start: clampedStart, end: clampedEnd });
+                }
+                updateInputsFromRegion();
+            });
+            updateInputsFromRegion();
+        });
+
+        const updateCurrentTime = () => {
+            const timeDisplay = document.getElementById('current-time');
+            if (timeDisplay && wavesurfer) {
+                const relativeTime = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
+                timeDisplay.textContent = relativeTime.toFixed(2);
+            }
+        };
+
+        wavesurfer.on('audioprocess', updateCurrentTime);
+        wavesurfer.on('pause', updateCurrentTime);
+
+        if (startInput) {
+            startInput.addEventListener('input', (event) => {
+                if (!currentRegion) return;
+                const value = parseFloat(event.target.value);
+                if (!Number.isNaN(value)) {
+                    const desiredStart = clampRelativeTime(value);
+                    const currentEnd = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                    const newStart = Math.min(desiredStart, currentEnd);
+                    currentRegion.setOptions({ start: toWaveformTime(newStart) });
+                    updateInputsFromRegion();
+                }
+            });
+        }
+
+        if (endInput) {
+            endInput.addEventListener('input', (event) => {
+                if (!currentRegion) return;
+                const value = parseFloat(event.target.value);
+                if (!Number.isNaN(value)) {
+                    const desiredEnd = clampRelativeTime(value);
+                    const currentStart = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                    const newEnd = Math.max(desiredEnd, currentStart);
+                    currentRegion.setOptions({ end: toWaveformTime(newEnd) });
+                    updateInputsFromRegion();
+                }
+            });
+        }
+
+        const playButton = document.getElementById('play-btn');
+        const pauseButton = document.getElementById('pause-btn');
+        const stopButton = document.getElementById('stop-btn');
+        const speedSelect = document.getElementById('speed-select');
+
+        if (playButton) {
+            playButton.addEventListener('click', () => {
+                let startRelative = currentRegion
+                    ? clampRelativeTime(fromWaveformTime(currentRegion.start))
+                    : clipStartRelative;
+                let endRelative = currentRegion
+                    ? clampRelativeTime(fromWaveformTime(currentRegion.end))
+                    : clipEndRelative;
+                startRelative = Math.max(0, startRelative - 0.2);
+                endRelative = Math.max(startRelative, endRelative + 0.2);
+                if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                    startRelative = clampRelativeTime(startRelative);
+                    endRelative = clampRelativeTime(endRelative);
+                }
+                wavesurfer.play(
+                    toWaveformTime(startRelative),
+                    toWaveformTime(endRelative)
+                );
+            });
+        }
+
+        if (pauseButton) {
+            pauseButton.addEventListener('click', () => wavesurfer && wavesurfer.pause());
+        }
+
+        if (stopButton) {
+            stopButton.addEventListener('click', () => {
+                if (!wavesurfer) return;
+                wavesurfer.stop();
+                wavesurfer.setTime(toWaveformTime(clipStartRelative));
+            });
+        }
+
+        if (speedSelect) {
+            speedSelect.addEventListener('change', (event) => {
+                const rate = parseFloat(event.target.value);
+                if (!Number.isNaN(rate) && wavesurfer) {
+                    wavesurfer.setPlaybackRate(rate);
+                }
+            });
+        }
+
+        document.addEventListener('keydown', (event) => {
+            if (!wavesurfer) return;
+            if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) {
+                return;
+            }
+            if (event.code === 'Space') {
+                event.preventDefault();
+                if (wavesurfer.isPlaying()) {
+                    wavesurfer.pause();
+                } else {
+                    let startRelative = currentRegion
+                        ? clampRelativeTime(fromWaveformTime(currentRegion.start))
+                        : clipStartRelative;
+                    let endRelative = currentRegion
+                        ? clampRelativeTime(fromWaveformTime(currentRegion.end))
+                        : clipEndRelative;
+                    startRelative = Math.max(0, startRelative - 0.2);
+                    endRelative = Math.max(startRelative, endRelative + 0.2);
+                    if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                        startRelative = clampRelativeTime(startRelative);
+                        endRelative = clampRelativeTime(endRelative);
+                    }
+                    wavesurfer.play(
+                        toWaveformTime(startRelative),
+                        toWaveformTime(endRelative)
+                    );
+                }
+            }
+            if (event.key.toLowerCase() === 'q' && currentRegion) {
+                event.preventDefault();
+                const time = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
+                const currentEnd = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                const newStart = Math.min(time, currentEnd);
+                currentRegion.setOptions({ start: toWaveformTime(newStart) });
+                updateInputsFromRegion();
+            }
+            if (event.key.toLowerCase() === 'w' && currentRegion) {
+                event.preventDefault();
+                const time = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
+                const currentStart = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                const newEnd = Math.max(time, currentStart);
+                currentRegion.setOptions({ end: toWaveformTime(newEnd) });
+                updateInputsFromRegion();
+            }
+        });
+    }
+
+    function syncClipLink() {
+        const mainContent = document.getElementById('main-content');
+        if (!mainContent) {
+            return;
+        }
+        const clipId = mainContent.dataset.clipId;
+        const shareInput = document.getElementById('share-link-input');
+        const copyButton = document.getElementById('copy-share-link');
+        const baseUrl = window.location.origin;
+        const shareUrl = clipId ? `${baseUrl}/clip/${clipId}` : `${baseUrl}/`;
+
+        if (clipId) {
+            const newPath = `/clip/${clipId}`;
+            if (window.location.pathname !== newPath) {
+                window.history.replaceState({}, '', newPath);
+            }
+        } else if (window.location.pathname !== '/') {
+            window.history.replaceState({}, '', '/');
+        }
+
+        if (shareInput) {
+            shareInput.value = shareUrl;
+        }
+
+        if (copyButton) {
+            copyButton.onclick = () => {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(shareUrl)
+                        .then(() => {
+                            copyButton.textContent = 'Link copied!';
+                            setTimeout(() => (copyButton.textContent = 'Copy link'), 2000);
+                        })
+                        .catch(() => {
+                            copyButton.textContent = 'Copy failed';
+                            setTimeout(() => (copyButton.textContent = 'Copy link'), 2000);
+                        });
+                } else if (shareInput) {
+                    shareInput.select();
+                    document.execCommand('copy');
+                }
+            };
+        }
+    }
+
+    function handleClipLoaded() {
+        initWaveSurfer();
+        syncClipLink();
+    }
+
+    document.addEventListener('DOMContentLoaded', handleClipLoaded);
+    document.body.addEventListener('htmx:afterSwap', (event) => {
+        if (event.target.id === 'main-content') {
+            handleClipLoaded();
+        }
+    });
+""")
+
+def render_app_page(clip: Optional[ClipRecord], status_message: Optional[str] = None) -> Titled:
+    """Render the full application shell for the given clip."""
+
+    main_content = render_main_content(clip)
+    contributor_stats = render_contributor_stats()
+
+    body_children = [
+        H1("Clip review"),
+        contributor_stats,
+    ]
+
+    if status_message:
+        body_children.append(
+            Div(
+                status_message,
+                role="status",
+                style=(
+                    "margin-bottom: 16px; padding: 12px; border-radius: 8px; background: #fff3cd; "
+                    "border: 1px solid #ffeaa7; color: #664d03;"
+                ),
+            )
+        )
+
+    body_children.append(main_content)
+
+    return Titled(
+        config.title,
+        Div(
+            *body_children,
+            cls="container"
+        ),
+        APP_SCRIPT,
+    )
+
+
 # Routes
 @rt("/")
 def index():
     """Main entry point for the crowdsourced clip review interface."""
     clip = select_random_clip()
-    main_content = render_main_content(clip)
-    contributor_stats = render_contributor_stats()
+    return render_app_page(clip)
 
-    return Titled(
-        config.title,
-        Div(
-            H1("Clip review"),
-            contributor_stats,
-            main_content,
-            cls="container"
-        ),
-        Script("""
-            let wavesurfer = null;
-            let wsRegions = null;
-            let currentRegion = null;
 
-            function initWaveSurfer() {
-                if (wavesurfer) {
-                    wavesurfer.destroy();
-                    wavesurfer = null;
-                }
-
-                const mainContent = document.getElementById('main-content');
-                if (!mainContent) {
-                    return;
-                }
-
-                const audioPath = mainContent.dataset.audioPath;
-                const segmentOffset = parseFloat(mainContent.dataset.segmentOffset || '0');
-                const segmentDuration = parseFloat(mainContent.dataset.segmentDuration || '0');
-                const clipStartAbsolute = parseFloat(mainContent.dataset.clipStart || '0');
-                const clipEndAbsolute = parseFloat(mainContent.dataset.clipEnd || '0');
-                const displayStartAbsolute = parseFloat(mainContent.dataset.displayStart || clipStartAbsolute);
-                const displayEndAbsolute = parseFloat(mainContent.dataset.displayEnd || clipEndAbsolute);
-                const isSegmentAudio = true; // we always play the segment audio now
-
-                const clipStartRelative = Math.max(0, clipStartAbsolute - segmentOffset);
-                const clipEndRelative = Math.max(clipStartRelative, clipEndAbsolute - segmentOffset);
-                let displayStartRelative = Math.max(0, displayStartAbsolute - segmentOffset);
-                let displayEndRelative = Math.max(displayStartRelative, displayEndAbsolute - segmentOffset);
-
-                if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                    displayStartRelative = Math.min(displayStartRelative, segmentDuration);
-                    displayEndRelative = Math.min(displayEndRelative, segmentDuration);
-                }
-
-                if (!audioPath) {
-                    return;
-                }
-
-                const startInput = document.getElementById('start-time-input');
-                const endInput = document.getElementById('end-time-input');
-                const startHiddenInput = document.getElementById('start-time-hidden');
-                const endHiddenInput = document.getElementById('end-time-hidden');
-                const startRelativeHiddenInput = document.getElementById('start-time-relative-hidden');
-                const endRelativeHiddenInput = document.getElementById('end-time-relative-hidden');
-
-                const clampRelativeTime = (value) => {
-                    let result = Number.isFinite(value) ? value : 0;
-                    result = Math.max(0, result);
-                    if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                        result = Math.min(result, segmentDuration);
-                    }
-                    return result;
-                };
-
-                const toWaveformTime = (relativeValue) => {
-                    // Segment audio: waveform timeline is 0..segmentDuration
-                    if (!Number.isFinite(relativeValue)) return relativeValue;
-                    return relativeValue;
-                };
-
-                const fromWaveformTime = (waveformValue) => {
-                    if (!Number.isFinite(waveformValue)) return waveformValue;
-                    return waveformValue;
-                };
-
-                const updateInputsFromRegion = () => {
-                    if (!currentRegion) return;
-                    const startRelative = clampRelativeTime(fromWaveformTime(currentRegion.start));
-                    const endRelative = clampRelativeTime(fromWaveformTime(currentRegion.end));
-                    if (startInput) startInput.value = startRelative.toFixed(2);
-                    if (endInput) endInput.value = endRelative.toFixed(2);
-                    if (startHiddenInput) startHiddenInput.value = (segmentOffset + startRelative).toFixed(6);
-                    if (endHiddenInput) endHiddenInput.value = (segmentOffset + endRelative).toFixed(6);
-                    if (startRelativeHiddenInput) startRelativeHiddenInput.value = startRelative.toFixed(6);
-                    if (endRelativeHiddenInput) endRelativeHiddenInput.value = endRelative.toFixed(6);
-                };
-
-                wavesurfer = WaveSurfer.create({
-                    container: '#waveform',
-                    waveColor: '#4F4A85',
-                    progressColor: '#383351',
-                    height: 140,
-                    barWidth: 2,
-                    barGap: 1,
-                    barRadius: 2,
-                    responsive: true,
-                });
-
-                wsRegions = wavesurfer.registerPlugin(WaveSurfer.Regions.create());
-                const formatTimelineLabel = (seconds) => {
-                    const relativeSeconds = clampRelativeTime(fromWaveformTime(seconds));
-
-                    if (!Number.isNaN(segmentDuration) && relativeSeconds > segmentDuration) {
-                        return '';
-                    }
-
-                    if (relativeSeconds >= 100) return relativeSeconds.toFixed(0);
-                    if (relativeSeconds >= 10) return relativeSeconds.toFixed(1);
-                    return relativeSeconds.toFixed(2);
-                };
-                wavesurfer.registerPlugin(WaveSurfer.Timeline.create({
-                    container: '#timeline',
-                    formatTimeCallback: formatTimelineLabel,
-                }));
-
-                // Build audio URL depending on whether audio_folder is local or remote
-                const audioFolder = '""" + f"{config.audio_folder}" + """';
-                const audioUrl = audioFolder.startsWith('http')
-                    ? audioFolder + '/' + audioPath
-                    : '/' + audioFolder + '/' + audioPath;
-
-                wavesurfer.load(audioUrl);
-
-                wavesurfer.on('ready', () => {
-                    wsRegions.clearRegions();
-                    currentRegion = wsRegions.addRegion({
-                        start: toWaveformTime(clipStartRelative),
-                        end: toWaveformTime(clipEndRelative),
-                        color: 'rgba(13, 110, 253, 0.3)',
-                        drag: true,
-                        resize: true,
-                    });
-
-                    currentRegion.on('update', updateInputsFromRegion);
-                    currentRegion.on('update-end', () => {
-                        if (!currentRegion) return;
-                        const startRelative = clampRelativeTime(fromWaveformTime(currentRegion.start));
-                        const endRelative = clampRelativeTime(fromWaveformTime(currentRegion.end));
-                        const clampedStart = toWaveformTime(startRelative);
-                        const clampedEnd = toWaveformTime(Math.max(endRelative, startRelative));
-                        if (clampedStart !== currentRegion.start || clampedEnd !== currentRegion.end) {
-                            currentRegion.setOptions({ start: clampedStart, end: clampedEnd });
-                        }
-                        updateInputsFromRegion();
-                    });
-                    updateInputsFromRegion();
-
-                    // Show the full segment, but position the playhead at the clip start
-                    wavesurfer.setTime(toWaveformTime(clipStartRelative));
-                });
-
-                const updateCurrentTime = () => {
-                    const timeDisplay = document.getElementById('current-time');
-                    if (timeDisplay && wavesurfer) {
-                        const relativeTime = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
-                        timeDisplay.textContent = relativeTime.toFixed(2);
-                    }
-                };
-
-                wavesurfer.on('audioprocess', updateCurrentTime);
-                wavesurfer.on('pause', updateCurrentTime);
-
-                if (startInput) {
-                    startInput.addEventListener('input', (event) => {
-                        if (!currentRegion) return;
-                        const value = parseFloat(event.target.value);
-                        if (!Number.isNaN(value)) {
-                            const desiredStart = clampRelativeTime(value);
-                            const currentEnd = clampRelativeTime(fromWaveformTime(currentRegion.end));
-                            const newStart = Math.min(desiredStart, currentEnd);
-                            currentRegion.setOptions({ start: toWaveformTime(newStart) });
-                            updateInputsFromRegion();
-                        }
-                    });
-                }
-
-                if (endInput) {
-                    endInput.addEventListener('input', (event) => {
-                        if (!currentRegion) return;
-                        const value = parseFloat(event.target.value);
-                        if (!Number.isNaN(value)) {
-                            const desiredEnd = clampRelativeTime(value);
-                            const currentStart = clampRelativeTime(fromWaveformTime(currentRegion.start));
-                            const newEnd = Math.max(desiredEnd, currentStart);
-                            currentRegion.setOptions({ end: toWaveformTime(newEnd) });
-                            updateInputsFromRegion();
-                        }
-                    });
-                }
-
-                const playButton = document.getElementById('play-btn');
-                const pauseButton = document.getElementById('pause-btn');
-                const stopButton = document.getElementById('stop-btn');
-                const speedSelect = document.getElementById('speed-select');
-
-                if (playButton) {
-                    playButton.addEventListener('click', () => {
-                        let startRelative = currentRegion
-                            ? clampRelativeTime(fromWaveformTime(currentRegion.start))
-                            : clipStartRelative;
-                        let endRelative = currentRegion
-                            ? clampRelativeTime(fromWaveformTime(currentRegion.end))
-                            : clipEndRelative;
-                        startRelative = Math.max(0, startRelative - 0.2);
-                        endRelative = Math.max(startRelative, endRelative + 0.2);
-                        if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                            startRelative = clampRelativeTime(startRelative);
-                            endRelative = clampRelativeTime(endRelative);
-                        }
-                        wavesurfer.play(
-                            toWaveformTime(startRelative),
-                            toWaveformTime(endRelative)
-                        );
-                    });
-                }
-
-                if (pauseButton) {
-                    pauseButton.addEventListener('click', () => wavesurfer && wavesurfer.pause());
-                }
-
-                if (stopButton) {
-                    stopButton.addEventListener('click', () => {
-                        if (!wavesurfer) return;
-                        wavesurfer.stop();
-                        // After stopping, put the playhead back at the clip start inside the segment
-                        wavesurfer.setTime(toWaveformTime(clipStartRelative));
-                    });
-                }
-
-                if (speedSelect) {
-                    speedSelect.addEventListener('change', (event) => {
-                        const rate = parseFloat(event.target.value);
-                        if (!Number.isNaN(rate) && wavesurfer) {
-                            wavesurfer.setPlaybackRate(rate);
-                        }
-                    });
-                }
-
-                document.addEventListener('keydown', (event) => {
-                    if (!wavesurfer) return;
-                    if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) {
-                        return;
-                    }
-                    if (event.code === 'Space') {
-                        event.preventDefault();
-                        if (wavesurfer.isPlaying()) {
-                            wavesurfer.pause();
-                        } else {
-                            let startRelative = currentRegion
-                                ? clampRelativeTime(fromWaveformTime(currentRegion.start))
-                                : clipStartRelative;
-                            let endRelative = currentRegion
-                                ? clampRelativeTime(fromWaveformTime(currentRegion.end))
-                                : clipEndRelative;
-                            startRelative = Math.max(0, startRelative - 0.2);
-                            endRelative = Math.max(startRelative, endRelative + 0.2);
-                            if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                                startRelative = clampRelativeTime(startRelative);
-                                endRelative = clampRelativeTime(endRelative);
-                            }
-                            wavesurfer.play(
-                                toWaveformTime(startRelative),
-                                toWaveformTime(endRelative)
-                            );
-                        }
-                    }
-                    if (event.key.toLowerCase() === 'q' && currentRegion) {
-                        event.preventDefault();
-                        const time = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
-                        const currentEnd = clampRelativeTime(fromWaveformTime(currentRegion.end));
-                        const newStart = Math.min(time, currentEnd);
-                        currentRegion.setOptions({ start: toWaveformTime(newStart) });
-                        updateInputsFromRegion();
-                    }
-                    if (event.key.toLowerCase() === 'w' && currentRegion) {
-                        event.preventDefault();
-                        const time = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
-                        const currentStart = clampRelativeTime(fromWaveformTime(currentRegion.start));
-                        const newEnd = Math.max(time, currentStart);
-                        currentRegion.setOptions({ end: toWaveformTime(newEnd) });
-                        updateInputsFromRegion();
-                    }
-                });
-            }
-
-            document.addEventListener('DOMContentLoaded', initWaveSurfer);
-            document.body.addEventListener('htmx:afterSwap', (event) => {
-                if (event.target.id === 'main-content') {
-                    initWaveSurfer();
-                }
-            });
-        """)
-    )
+@rt("/clip/{clip_id:int}")
+def clip_detail(clip_id: int):
+    """Load a specific clip directly via permalink."""
+    clip = get_clip(str(clip_id))
+    status_message = None
+    if clip is None:
+        status_message = f"Clip {clip_id} is not available. Showing another clip instead."
+        clip = select_random_clip()
+    return render_app_page(clip, status_message=status_message)
 
 
 @rt("/next_clip", methods=["POST"])
