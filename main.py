@@ -48,7 +48,7 @@ SEGMENT_SUBDIR_NAME = "segments"
 AUDIO_FOLDER_IS_REMOTE = config.audio_folder.startswith(("http://", "https://"))
 
 # Constants for the review workflow
-CLIP_PADDING_SECONDS = 1.5
+CLIP_PADDING_SECONDS = 2
 
 # Initialize FastHTML app with custom styles and scripts
 app, rt = fast_app(
@@ -167,21 +167,17 @@ def compute_display_window(
     lower_bound: float = 0.0,
     upper_bound: Optional[float] = None,
 ) -> tuple[float, float]:
-    """Return the playback window that surrounds the clip with a safety margin."""
-
-    padded_start = max(lower_bound, start - CLIP_PADDING_SECONDS)
-    padded_end = end + CLIP_PADDING_SECONDS
-
-    if upper_bound is not None:
-        padded_end = min(upper_bound, padded_end)
-
-    if padded_end <= padded_start:
-        minimal_length = max(end - start, 0.5)
-        padded_end = padded_start + minimal_length
-        if upper_bound is not None:
-            padded_end = min(upper_bound, padded_end)
-
-    return padded_start, padded_end
+    """Return the full segment window instead of adding padding around the clip."""
+    
+    # Always show the full segment range available
+    display_start = lower_bound
+    display_end = upper_bound if upper_bound is not None else end
+    
+    # Ensure we have a minimum window if segment bounds are invalid
+    if display_end <= display_start:
+        display_end = display_start + max(end - start, 0.5)
+    
+    return display_start, display_end
 
 
 def parse_relative_offsets(
