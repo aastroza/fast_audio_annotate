@@ -744,18 +744,9 @@ def index():
                     });
                     updateInputsFromRegion();
 
-                    if (isSegmentAudio && !Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                        // For segment audio, zoom to show the entire segment duration
-                        const pxPerSec = Math.max(120, 900 / segmentDuration);
-                        wavesurfer.zoomTo(pxPerSec);
-                        wavesurfer.setTime(0); // Start at beginning of segment
-                    } else {
-                        // For original audio, use the display window
-                        const viewDuration = Math.max(0.5, displayEndRelative - displayStartRelative);
-                        const pxPerSec = Math.max(120, 900 / viewDuration);
-                        wavesurfer.zoomTo(pxPerSec);
-                        wavesurfer.setTime(toWaveformTime(displayStartRelative));
-                    }
+                    // Remove zoom logic - let WaveSurfer show the full segment naturally
+                    // Just set the initial position to the beginning
+                    wavesurfer.setTime(0);
                 });
 
                 const updateCurrentTime = () => {
