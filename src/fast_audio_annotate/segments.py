@@ -33,7 +33,9 @@ def compute_segment_window(
     """Return the desired segment window surrounding the clip."""
 
     start = max(lower_bound, clip_start - padding)
-    end = clip_end + padding
+    unapplied_padding = padding - (clip_start - start)
+    end = clip_end + padding + unapplied_padding
+
     if end <= start:
         end = start + max(clip_end - clip_start, minimum_duration)
     return start, end
