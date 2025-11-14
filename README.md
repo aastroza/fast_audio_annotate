@@ -2,7 +2,7 @@
 
 Fast Audio Annotate is a lightweight FastHTML interface built for collective audio transcription review.
 
-![screenshot](/Capture.PNG "Screenshot of the app")
+![screenshot](/CaptureAnnotation.PNG "Screenshot of the app")
 
 ## Workflow
 
