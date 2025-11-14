@@ -184,6 +184,24 @@ def compute_display_window(
     return padded_start, padded_end
 
 
+def parse_relative_offsets(
+    start_value: str,
+    end_value: str,
+) -> tuple[Optional[float], Optional[float]]:
+    """Parse user-provided relative offsets, returning ``None`` on failure."""
+
+    try:
+        start = float(start_value)
+        end = float(end_value)
+    except (TypeError, ValueError):
+        return None, None
+
+    if start < 0 or end <= start:
+        return None, None
+
+    return start, end
+
+
 def ensure_clip_segment(clip: Optional[ClipRecord]) -> Optional[ClipRecord]:
     """Attach stored segment metadata to ``clip`` if available."""
 
@@ -232,8 +250,15 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         lower_bound=segment_offset,
         upper_bound=segment_end,
     )
-    relative_clip_start = max(0.0, clip.start_timestamp - segment_offset)
-    relative_clip_end = max(relative_clip_start, clip.end_timestamp - segment_offset)
+    if clip.relative_start_offset is not None:
+        relative_clip_start = max(0.0, clip.relative_start_offset)
+    else:
+        relative_clip_start = max(0.0, clip.start_timestamp - segment_offset)
+
+    if clip.relative_end_offset is not None:
+        relative_clip_end = max(relative_clip_start, clip.relative_end_offset)
+    else:
+        relative_clip_end = max(relative_clip_start, clip.end_timestamp - segment_offset)
     relative_display_start = max(0.0, padded_start - segment_offset)
     relative_display_end = max(relative_display_start, padded_end - segment_offset)
     segment_duration = None
@@ -294,11 +319,25 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         Input(type="hidden", name="clip_id", value=str(clip.id)),
         Div(
             Div(
-                Label("Start (seconds)", style="display: block; margin-bottom: 4px; font-weight: 600;"),
+                Label(
+                    "Start within segment (seconds)",
+                    style="display: block; margin-bottom: 4px; font-weight: 600;",
+                ),
+                Input(
+                    type="hidden",
+                    name="start_time",
+                    value=f"{clip.start_timestamp:.6f}",
+                    id="start-time-hidden",
+                ),
+                Input(
+                    type="hidden",
+                    name="start_time_relative",
+                    value=f"{relative_clip_start:.6f}",
+                    id="start-time-relative-hidden",
+                ),
                 Input(
                     type="number",
-                    name="start_time",
-                    value=f"{clip.start_timestamp:.2f}",
+                    value=f"{relative_clip_start:.2f}",
                     step="0.01",
                     min="0",
                     id="start-time-input",
@@ -306,11 +345,25 @@ def render_clip_editor(clip: ClipRecord) -> Div:
                 ),
             ),
             Div(
-                Label("End (seconds)", style="display: block; margin-bottom: 4px; font-weight: 600;"),
+                Label(
+                    "End within segment (seconds)",
+                    style="display: block; margin-bottom: 4px; font-weight: 600;",
+                ),
+                Input(
+                    type="hidden",
+                    name="end_time",
+                    value=f"{clip.end_timestamp:.6f}",
+                    id="end-time-hidden",
+                ),
+                Input(
+                    type="hidden",
+                    name="end_time_relative",
+                    value=f"{relative_clip_end:.6f}",
+                    id="end-time-relative-hidden",
+                ),
                 Input(
                     type="number",
-                    name="end_time",
-                    value=f"{clip.end_timestamp:.2f}",
+                    value=f"{relative_clip_end:.2f}",
                     step="0.01",
                     min="0",
                     id="end-time-input",
@@ -463,7 +516,8 @@ def render_clip_editor(clip: ClipRecord) -> Div:
         data_segment_offset=f"{segment_offset:.2f}",
         data_segment_duration=(
             f"{segment_duration:.2f}" if segment_duration is not None else ""
-        )
+        ),
+        data_is_segment_audio=("1" if clip.segment_path else "0"),
     )
 
 
@@ -579,15 +633,16 @@ def index():
                 const clipEndAbsolute = parseFloat(mainContent.dataset.clipEnd || '0');
                 const displayStartAbsolute = parseFloat(mainContent.dataset.displayStart || clipStartAbsolute);
                 const displayEndAbsolute = parseFloat(mainContent.dataset.displayEnd || clipEndAbsolute);
+                const isSegmentAudio = mainContent.dataset.isSegmentAudio === '1';
 
-                const clipStart = Math.max(0, clipStartAbsolute - segmentOffset);
-                const clipEnd = Math.max(clipStart, clipEndAbsolute - segmentOffset);
-                let displayStart = Math.max(0, displayStartAbsolute - segmentOffset);
-                let displayEnd = Math.max(displayStart, displayEndAbsolute - segmentOffset);
+                const clipStartRelative = Math.max(0, clipStartAbsolute - segmentOffset);
+                const clipEndRelative = Math.max(clipStartRelative, clipEndAbsolute - segmentOffset);
+                let displayStartRelative = Math.max(0, displayStartAbsolute - segmentOffset);
+                let displayEndRelative = Math.max(displayStartRelative, displayEndAbsolute - segmentOffset);
 
                 if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                    displayStart = Math.min(displayStart, segmentDuration);
-                    displayEnd = Math.min(displayEnd, segmentDuration);
+                    displayStartRelative = Math.min(displayStartRelative, segmentDuration);
+                    displayEndRelative = Math.min(displayEndRelative, segmentDuration);
                 }
 
                 if (!audioPath) {
@@ -596,21 +651,40 @@ def index():
 
                 const startInput = document.getElementById('start-time-input');
                 const endInput = document.getElementById('end-time-input');
+                const startHiddenInput = document.getElementById('start-time-hidden');
+                const endHiddenInput = document.getElementById('end-time-hidden');
+                const startRelativeHiddenInput = document.getElementById('start-time-relative-hidden');
+                const endRelativeHiddenInput = document.getElementById('end-time-relative-hidden');
 
                 const clampRelativeTime = (value) => {
-                    let result = Math.max(0, value);
+                    let result = Number.isFinite(value) ? value : 0;
+                    result = Math.max(0, result);
                     if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
                         result = Math.min(result, segmentDuration);
                     }
                     return result;
                 };
 
+                const toWaveformTime = (relativeValue) => {
+                    if (!Number.isFinite(relativeValue)) return relativeValue;
+                    return isSegmentAudio ? relativeValue : segmentOffset + relativeValue;
+                };
+
+                const fromWaveformTime = (waveformValue) => {
+                    if (!Number.isFinite(waveformValue)) return waveformValue;
+                    return isSegmentAudio ? waveformValue : waveformValue - segmentOffset;
+                };
+
                 const updateInputsFromRegion = () => {
                     if (!currentRegion) return;
-                    const absoluteStart = segmentOffset + currentRegion.start;
-                    const absoluteEnd = segmentOffset + currentRegion.end;
-                    if (startInput) startInput.value = absoluteStart.toFixed(2);
-                    if (endInput) endInput.value = absoluteEnd.toFixed(2);
+                    const startRelative = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                    const endRelative = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                    if (startInput) startInput.value = startRelative.toFixed(2);
+                    if (endInput) endInput.value = endRelative.toFixed(2);
+                    if (startHiddenInput) startHiddenInput.value = (segmentOffset + startRelative).toFixed(6);
+                    if (endHiddenInput) endHiddenInput.value = (segmentOffset + endRelative).toFixed(6);
+                    if (startRelativeHiddenInput) startRelativeHiddenInput.value = startRelative.toFixed(6);
+                    if (endRelativeHiddenInput) endRelativeHiddenInput.value = endRelative.toFixed(6);
                 };
 
                 wavesurfer = WaveSurfer.create({
@@ -625,8 +699,15 @@ def index():
                 });
 
                 wsRegions = wavesurfer.registerPlugin(WaveSurfer.Regions.create());
+                const formatTimelineLabel = (seconds) => {
+                    const relativeSeconds = clampRelativeTime(fromWaveformTime(seconds));
+                    if (relativeSeconds >= 100) return relativeSeconds.toFixed(0);
+                    if (relativeSeconds >= 10) return relativeSeconds.toFixed(1);
+                    return relativeSeconds.toFixed(2);
+                };
                 wavesurfer.registerPlugin(WaveSurfer.Timeline.create({
                     container: '#timeline',
+                    formatTimeCallback: formatTimelineLabel,
                 }));
 
                 // Construct audio URL - use full URL if config.audio_folder is a URL, otherwise use local path
@@ -640,27 +721,38 @@ def index():
                 wavesurfer.on('ready', () => {
                     wsRegions.clearRegions();
                     currentRegion = wsRegions.addRegion({
-                        start: clipStart,
-                        end: clipEnd,
+                        start: toWaveformTime(clipStartRelative),
+                        end: toWaveformTime(clipEndRelative),
                         color: 'rgba(13, 110, 253, 0.3)',
                         drag: true,
                         resize: true,
                     });
 
                     currentRegion.on('update', updateInputsFromRegion);
+                    currentRegion.on('update-end', () => {
+                        if (!currentRegion) return;
+                        const startRelative = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                        const endRelative = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                        const clampedStart = toWaveformTime(startRelative);
+                        const clampedEnd = toWaveformTime(Math.max(endRelative, startRelative));
+                        if (clampedStart !== currentRegion.start || clampedEnd !== currentRegion.end) {
+                            currentRegion.setOptions({ start: clampedStart, end: clampedEnd });
+                        }
+                        updateInputsFromRegion();
+                    });
                     updateInputsFromRegion();
 
-                    const viewDuration = Math.max(0.5, displayEnd - displayStart);
+                    const viewDuration = Math.max(0.5, displayEndRelative - displayStartRelative);
                     const pxPerSec = Math.max(120, 900 / viewDuration);
                     wavesurfer.zoomTo(pxPerSec);
-                    wavesurfer.setTime(displayStart);
+                    wavesurfer.setTime(toWaveformTime(displayStartRelative));
                 });
 
                 const updateCurrentTime = () => {
                     const timeDisplay = document.getElementById('current-time');
                     if (timeDisplay && wavesurfer) {
-                        const absoluteTime = segmentOffset + wavesurfer.getCurrentTime();
-                        timeDisplay.textContent = absoluteTime.toFixed(2);
+                        const relativeTime = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
+                        timeDisplay.textContent = relativeTime.toFixed(2);
                     }
                 };
 
@@ -672,8 +764,11 @@ def index():
                         if (!currentRegion) return;
                         const value = parseFloat(event.target.value);
                         if (!Number.isNaN(value)) {
-                            const desiredStart = clampRelativeTime(value - segmentOffset);
-                            currentRegion.setOptions({ start: Math.min(desiredStart, currentRegion.end) });
+                            const desiredStart = clampRelativeTime(value);
+                            const currentEnd = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                            const newStart = Math.min(desiredStart, currentEnd);
+                            currentRegion.setOptions({ start: toWaveformTime(newStart) });
+                            updateInputsFromRegion();
                         }
                     });
                 }
@@ -683,8 +778,11 @@ def index():
                         if (!currentRegion) return;
                         const value = parseFloat(event.target.value);
                         if (!Number.isNaN(value)) {
-                            const desiredEnd = clampRelativeTime(value - segmentOffset);
-                            currentRegion.setOptions({ end: Math.max(desiredEnd, currentRegion.start) });
+                            const desiredEnd = clampRelativeTime(value);
+                            const currentStart = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                            const newEnd = Math.max(desiredEnd, currentStart);
+                            currentRegion.setOptions({ end: toWaveformTime(newEnd) });
+                            updateInputsFromRegion();
                         }
                     });
                 }
@@ -696,13 +794,22 @@ def index():
 
                 if (playButton) {
                     playButton.addEventListener('click', () => {
-                        let start = Math.max(0, (currentRegion ? currentRegion.start : clipStart) - 0.2);
-                        let end = currentRegion ? currentRegion.end + 0.2 : clipEnd;
+                        let startRelative = currentRegion
+                            ? clampRelativeTime(fromWaveformTime(currentRegion.start))
+                            : clipStartRelative;
+                        let endRelative = currentRegion
+                            ? clampRelativeTime(fromWaveformTime(currentRegion.end))
+                            : clipEndRelative;
+                        startRelative = Math.max(0, startRelative - 0.2);
+                        endRelative = Math.max(startRelative, endRelative + 0.2);
                         if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                            start = Math.max(0, Math.min(start, segmentDuration));
-                            end = Math.max(start, Math.min(end, segmentDuration));
+                            startRelative = clampRelativeTime(startRelative);
+                            endRelative = clampRelativeTime(endRelative);
                         }
-                        wavesurfer.play(start, end);
+                        wavesurfer.play(
+                            toWaveformTime(startRelative),
+                            toWaveformTime(endRelative)
+                        );
                     });
                 }
 
@@ -714,7 +821,7 @@ def index():
                     stopButton.addEventListener('click', () => {
                         if (!wavesurfer) return;
                         wavesurfer.stop();
-                        wavesurfer.setTime(displayStart);
+                        wavesurfer.setTime(toWaveformTime(displayStartRelative));
                     });
                 }
 
@@ -737,25 +844,38 @@ def index():
                         if (wavesurfer.isPlaying()) {
                             wavesurfer.pause();
                         } else {
-                            let start = Math.max(0, (currentRegion ? currentRegion.start : clipStart) - 0.2);
-                            let end = currentRegion ? currentRegion.end + 0.2 : clipEnd;
+                            let startRelative = currentRegion
+                                ? clampRelativeTime(fromWaveformTime(currentRegion.start))
+                                : clipStartRelative;
+                            let endRelative = currentRegion
+                                ? clampRelativeTime(fromWaveformTime(currentRegion.end))
+                                : clipEndRelative;
+                            startRelative = Math.max(0, startRelative - 0.2);
+                            endRelative = Math.max(startRelative, endRelative + 0.2);
                             if (!Number.isNaN(segmentDuration) && segmentDuration > 0) {
-                                start = Math.max(0, Math.min(start, segmentDuration));
-                                end = Math.max(start, Math.min(end, segmentDuration));
+                                startRelative = clampRelativeTime(startRelative);
+                                endRelative = clampRelativeTime(endRelative);
                             }
-                            wavesurfer.play(start, end);
+                            wavesurfer.play(
+                                toWaveformTime(startRelative),
+                                toWaveformTime(endRelative)
+                            );
                         }
                     }
                     if (event.key.toLowerCase() === 'q' && currentRegion) {
                         event.preventDefault();
-                        const time = clampRelativeTime(wavesurfer.getCurrentTime());
-                        currentRegion.setOptions({ start: Math.min(time, currentRegion.end) });
+                        const time = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
+                        const currentEnd = clampRelativeTime(fromWaveformTime(currentRegion.end));
+                        const newStart = Math.min(time, currentEnd);
+                        currentRegion.setOptions({ start: toWaveformTime(newStart) });
                         updateInputsFromRegion();
                     }
                     if (event.key.toLowerCase() === 'w' && currentRegion) {
                         event.preventDefault();
-                        const time = clampRelativeTime(wavesurfer.getCurrentTime());
-                        currentRegion.setOptions({ end: Math.max(time, currentRegion.start) });
+                        const time = clampRelativeTime(fromWaveformTime(wavesurfer.getCurrentTime()));
+                        const currentStart = clampRelativeTime(fromWaveformTime(currentRegion.start));
+                        const newEnd = Math.max(time, currentStart);
+                        currentRegion.setOptions({ end: toWaveformTime(newEnd) });
                         updateInputsFromRegion();
                     }
                 });
@@ -772,7 +892,15 @@ def index():
 
 
 @rt("/next_clip", methods=["POST"])
-def next_clip(clip_id: str = "", start_time: str = "0", end_time: str = "0", transcription: str = "", contributor_name: str = ""):
+def next_clip(
+    clip_id: str = "",
+    start_time: str = "0",
+    end_time: str = "0",
+    start_time_relative: str = "0",
+    end_time_relative: str = "0",
+    transcription: str = "",
+    contributor_name: str = "",
+):
     """Move to the next random clip without completing the current one."""
     # Optionally save current progress before moving to next clip
     current_clip = get_clip(clip_id)
@@ -780,17 +908,21 @@ def next_clip(clip_id: str = "", start_time: str = "0", end_time: str = "0", tra
         try:
             start = float(start_time)
             end = float(end_time)
-            if start >= 0 and end > start:
-                updates = {
-                    'start_timestamp': start,
-                    'end_timestamp': end,
-                    'text': transcription,
-                    'timestamp': datetime.now().isoformat(),
-                    'username': get_username(contributor_name),
-                }
-                db_backend.update_clip(current_clip.id, updates)
         except ValueError:
-            pass
+            start = end = None
+        if start is not None and start >= 0 and end > start:
+            updates = {
+                'start_timestamp': start,
+                'end_timestamp': end,
+                'text': transcription,
+                'timestamp': datetime.now().isoformat(),
+                'username': get_username(contributor_name),
+            }
+            rel_start, rel_end = parse_relative_offsets(start_time_relative, end_time_relative)
+            if rel_start is not None and rel_end is not None:
+                updates['relative_start_offset'] = rel_start
+                updates['relative_end_offset'] = rel_end
+            db_backend.update_clip(current_clip.id, updates)
     
     # Get a new random clip
     next_clip = select_random_clip()
@@ -798,32 +930,52 @@ def next_clip(clip_id: str = "", start_time: str = "0", end_time: str = "0", tra
 
 
 @rt("/complete_clip", methods=["POST"])
-def complete_clip(clip_id: str = "", start_time: str = "0", end_time: str = "0", transcription: str = "", contributor_name: str = ""):
+def complete_clip(
+    clip_id: str = "",
+    start_time: str = "0",
+    end_time: str = "0",
+    start_time_relative: str = "0",
+    end_time_relative: str = "0",
+    transcription: str = "",
+    contributor_name: str = "",
+):
     """Finalize a clip as human reviewed and move to another task."""
     clip = get_clip(clip_id)
     if clip:
         try:
             start = float(start_time)
             end = float(end_time)
-            if start >= 0 and end > start:
-                updates = {
-                    'start_timestamp': start,
-                    'end_timestamp': end,
-                    'text': transcription,
-                    'timestamp': datetime.now().isoformat(),
-                    'username': get_username(contributor_name),
-                    'human_reviewed': True,
-                    'marked': False,
-                }
-                db_backend.update_clip(clip.id, updates)
         except ValueError:
-            pass
+            start = end = None
+        if start is not None and start >= 0 and end > start:
+            updates = {
+                'start_timestamp': start,
+                'end_timestamp': end,
+                'text': transcription,
+                'timestamp': datetime.now().isoformat(),
+                'username': get_username(contributor_name),
+                'human_reviewed': True,
+                'marked': False,
+            }
+            rel_start, rel_end = parse_relative_offsets(start_time_relative, end_time_relative)
+            if rel_start is not None and rel_end is not None:
+                updates['relative_start_offset'] = rel_start
+                updates['relative_end_offset'] = rel_end
+            db_backend.update_clip(clip.id, updates)
     next_clip = select_random_clip()
     return render_main_content(next_clip)
 
 
 @rt("/flag_clip", methods=["POST"])
-def flag_clip(clip_id: str = "", transcription: str = "", start_time: str = "0", end_time: str = "0", contributor_name: str = ""):
+def flag_clip(
+    clip_id: str = "",
+    transcription: str = "",
+    start_time: str = "0",
+    end_time: str = "0",
+    start_time_relative: str = "0",
+    end_time_relative: str = "0",
+    contributor_name: str = "",
+):
     """Mark a clip as problematic so it disappears from the review queue."""
     clip = get_clip(clip_id)
     if clip:
@@ -836,11 +988,15 @@ def flag_clip(clip_id: str = "", transcription: str = "", start_time: str = "0",
         try:
             start = float(start_time)
             end = float(end_time)
-            if start >= 0 and end > start:
-                updates['start_timestamp'] = start
-                updates['end_timestamp'] = end
         except ValueError:
-            pass
+            start = end = None
+        if start is not None and start >= 0 and end > start:
+            updates['start_timestamp'] = start
+            updates['end_timestamp'] = end
+            rel_start, rel_end = parse_relative_offsets(start_time_relative, end_time_relative)
+            if rel_start is not None and rel_end is not None:
+                updates['relative_start_offset'] = rel_start
+                updates['relative_end_offset'] = rel_end
         db_backend.update_clip(clip.id, updates)
     next_clip = select_random_clip()
     return render_main_content(next_clip)
