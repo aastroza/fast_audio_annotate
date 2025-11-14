@@ -697,6 +697,12 @@ def index():
                 wsRegions = wavesurfer.registerPlugin(WaveSurfer.Regions.create());
                 const formatTimelineLabel = (seconds) => {
                     const relativeSeconds = clampRelativeTime(fromWaveformTime(seconds));
+                    
+                    // For segment audio, don't show labels beyond segment duration
+                    if (isSegmentAudio && !Number.isNaN(segmentDuration) && relativeSeconds > segmentDuration) {
+                        return '';
+                    }
+                    
                     if (relativeSeconds >= 100) return relativeSeconds.toFixed(0);
                     if (relativeSeconds >= 10) return relativeSeconds.toFixed(1);
                     return relativeSeconds.toFixed(2);
@@ -738,10 +744,18 @@ def index():
                     });
                     updateInputsFromRegion();
 
-                    const viewDuration = Math.max(0.5, displayEndRelative - displayStartRelative);
-                    const pxPerSec = Math.max(120, 900 / viewDuration);
-                    wavesurfer.zoomTo(pxPerSec);
-                    wavesurfer.setTime(toWaveformTime(displayStartRelative));
+                    if (isSegmentAudio && !Number.isNaN(segmentDuration) && segmentDuration > 0) {
+                        // For segment audio, zoom to show the entire segment duration
+                        const pxPerSec = Math.max(120, 900 / segmentDuration);
+                        wavesurfer.zoomTo(pxPerSec);
+                        wavesurfer.setTime(0); // Start at beginning of segment
+                    } else {
+                        // For original audio, use the display window
+                        const viewDuration = Math.max(0.5, displayEndRelative - displayStartRelative);
+                        const pxPerSec = Math.max(120, 900 / viewDuration);
+                        wavesurfer.zoomTo(pxPerSec);
+                        wavesurfer.setTime(toWaveformTime(displayStartRelative));
+                    }
                 });
 
                 const updateCurrentTime = () => {
